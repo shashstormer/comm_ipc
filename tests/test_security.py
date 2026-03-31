@@ -1,0 +1,98 @@
+import asyncio
+import unittest
+import os
+from tests.base import start_test_server, stop_test_server
+from comm_ipc.client import CommIPC
+from comm_ipc.comm_data import CommData
+
+class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.socket_path = "/tmp/test_security.sock"
+        self.server, self.server_task = await start_test_server(socket_path=self.socket_path)
+        self.server.error_policy = "broadcast"
+        self.server.channel_passwords["secure"] = "1234"
+
+    async def asyncTearDown(self):
+        await stop_test_server(self.server_task)
+        if os.path.exists(self.socket_path):
+            os.remove(self.socket_path)
+
+    async def test_auto_id(self):
+        client = CommIPC(socket_path=self.socket_path)
+        await client.connect()
+        self.assertTrue(client.client_id.startswith("cli-"))
+        await client.close()
+
+    async def test_id_collision(self):
+        c1 = CommIPC(client_id="same-id", socket_path=self.socket_path)
+        await c1.connect()
+        
+        c2 = CommIPC(client_id="same-id", socket_path=self.socket_path)
+        with self.assertRaises(Exception) as cm:
+            await c2.connect()
+        self.assertIn("already in use", str(cm.exception))
+        
+        await c1.close()
+
+    async def test_password_protection(self):
+        c_bad = CommIPC(client_id="bad-actor", socket_path=self.socket_path)
+        provider = CommIPC(client_id="admin", socket_path=self.socket_path)
+        consumer = CommIPC(client_id="user", socket_path=self.socket_path)
+        
+        try:
+            await c_bad.connect()
+            ch_bad = await c_bad.open("secure", password="wrong")
+            
+            await provider.connect()
+            ch_admin = await provider.open("secure", password="1234")
+            
+            async def secret_call(cd: CommData): return "done"
+            await ch_admin.add_event("shutdown", call=secret_call)
+            
+            await consumer.connect()
+            ch_user = await consumer.open("secure", password="1234")
+            res = await ch_user.event("shutdown", {})
+            self.assertEqual(res.data, "done")
+        finally:
+            await asyncio.gather(
+                c_bad.close(),
+                provider.close(),
+                consumer.close(),
+                return_exceptions=True
+            )
+
+    async def test_duplicate_listener(self):
+        c1 = CommIPC(client_id="p1", socket_path=self.socket_path)
+        ch1 = await c1.open("dup_chan")
+        await ch1.add_event("event1", call=lambda cd: "ok")
+        
+        c2 = CommIPC(client_id="p2", socket_path=self.socket_path)
+        ch2 = await c2.open("dup_chan")
+                                                                                                                            
+                                                                                          
+        await ch2.add_event("event1", call=lambda cd: "fail")
+        
+        self.assertEqual(len(self.server.providers["dup_chan"]), 1)
+        self.assertEqual(self.server.providers["dup_chan"]["event1"], "p1")
+        
+        await c1.close()
+        await c2.close()
+
+    async def test_duplicate_password_set(self):
+        err_event = asyncio.Event()
+        async def on_err(e):
+            if "already set" in str(e): err_event.set()
+        client = CommIPC(on_error=on_err, socket_path=self.socket_path)
+        await client.connect()
+        print("[DEBUG] sending first set_password")
+        await client.send_msg({"type": "set_password", "channel": "sec", "password": "p1"})
+        await asyncio.sleep(0.2)
+        print("[DEBUG] sending second set_password")
+        await client.send_msg({"type": "set_password", "channel": "sec", "password": "p2"})
+        print("[DEBUG] waiting for error event")
+        await asyncio.wait_for(err_event.wait(), timeout=3.0)
+        print("[DEBUG] error event received!")
+        await client.close()
+
+if __name__ == "__main__":
+    unittest.main()
