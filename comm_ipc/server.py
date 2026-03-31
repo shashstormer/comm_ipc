@@ -15,23 +15,26 @@ from comm_ipc import security
 
 
 class CommIPCServer:
-    def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, error_policy: str = "ignore", connection_secret: str = None):
+    def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, 
+                 error_policy: str = "ignore", connection_secret: str = None,
+                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate"):
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.clients: Dict[str, asyncio.StreamWriter] = {}
         self.active_writers: Set[asyncio.StreamWriter] = set()
         self.channels: Dict[str, List[str]] = {}
-        self.channel_passwords: Dict[str, str] = {}
+        self.channel_passwords: Dict[str, str] = system_passwords or {}
+        self.channel_members: Dict[str, List[str]] = {}
+        self.channel_policy = channel_policy
         self.providers: Dict[str, Dict[str, str]] = {}
         self.error_policy = error_policy
         self._reporting_error = False
         self.auth_challenges: Dict[str, Dict[str, Any]] = {}
         self.connection_secret_hash = security.hash_secret(connection_secret) if connection_secret else None
         self.unauthenticated_clients: Set[asyncio.StreamWriter] = set()
-        self._cleanup_task = asyncio.create_task(self._prune_challenges())
+        self._cleanup_task = None
 
     async def _prune_challenges(self):
-        """Periodically prune expired auth challenges (DoS mitigation)."""
         while True:
             await asyncio.sleep(60)
             now = time.time()
@@ -104,11 +107,14 @@ class CommIPCServer:
                 self.clients[client_id] = writer
 
             while True:
-                len_data = await reader.readexactly(4)
-                if not len_data: break
-                length = struct.unpack(">I", len_data)[0]
-                data = await reader.readexactly(length)
-                msg = json.loads(data.decode())
+                try:
+                    len_data = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
+                    if not len_data: break
+                    length = struct.unpack(">I", len_data)[0]
+                    data = await asyncio.wait_for(reader.readexactly(length), timeout=5.0)
+                    msg = json.loads(data.decode())
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                    break
                 
                 if self.connection_secret_hash:
                     if not self.auth_challenges.get(client_id, {}).get("authenticated"):
@@ -124,6 +130,27 @@ class CommIPCServer:
             await self._report_error(e, client_id)
         finally:
             if client_id:
+                for channel in list(self.channel_members.keys()):
+                    if client_id in self.channel_members[channel]:
+                        is_owner = (self.channel_members[channel][0] == client_id)
+                        self.channel_members[channel].remove(client_id)
+                        
+                        if is_owner and self.channel_policy == "terminate" and self.channel_members[channel]:
+                            for other_id in list(self.channel_members[channel]):
+                                if other_id in self.clients:
+                                    await self._send_to_client(other_id, {"type": "error", "message": "Channel owner disconnected, channel terminated"})
+                                    if channel in self.channels and other_id in self.channels[channel]:
+                                        self.channels[channel].remove(other_id)
+                                    if channel in self.providers:
+                                        evs = [ev for ev, pid in self.providers[channel].items() if pid == other_id]
+                                        for ev in evs: del self.providers[channel][ev]
+                            self.channel_members[channel] = []
+
+                        if not self.channel_members[channel]:
+                            if channel in self.channel_passwords and not channel.startswith("__comm_ipc"):
+                                del self.channel_passwords[channel]
+                            del self.channel_members[channel]
+
                 if client_id in self.clients:
                     del self.clients[client_id]
                 for channel in list(self.channels.keys()):
@@ -187,16 +214,27 @@ class CommIPCServer:
                     "type": "auth_challenge",
                     "channel": chan_name,
                     "challenge": challenge,
-                    "challenge_id": challenge_id
+                    "challenge_id": challenge_id,
+                    "request_id": reg.get("request_id")
                 })
                 return
 
             if client_id not in self.auth_challenges or challenge_id not in self.auth_challenges[client_id]:
+                await self._send_to_client(client_id, {
+                    "type": "response",
+                    "request_id": reg.get("request_id"),
+                    "error": "Invalid or expired challenge"
+                })
                 await self._report_error(Exception("Invalid or expired challenge"), client_id)
                 return
             
             challenge_data = self.auth_challenges[client_id].pop(challenge_id)
             if time.time() - challenge_data["timestamp"] > 60:
+                await self._send_to_client(client_id, {
+                    "type": "response",
+                    "request_id": reg.get("request_id"),
+                    "error": "Challenge expired"
+                })
                 await self._report_error(Exception("Challenge expired"), client_id)
                 return
             
@@ -207,21 +245,44 @@ class CommIPCServer:
             ).hexdigest()
             
             if not hmac.compare_digest(expected_proof, proof):
+                await self._send_to_client(client_id, {
+                    "type": "response",
+                    "request_id": reg.get("request_id"),
+                    "error": "Invalid channel password"
+                })
                 await self._report_error(Exception("Invalid channel password"), client_id)
                 return
             
-            reg = challenge_data["reg"]
-            chan_name = reg.get("channel")
+            original_reg = challenge_data["reg"]
+            reg = original_reg
             is_provider = reg.get("is_provider", False)
             event = reg.get("event")
+            is_stream = reg.get("is_stream", False)
+
+        if chan_name not in self.channel_members:
+            self.channel_members[chan_name] = []
+        if client_id not in self.channel_members[chan_name]:
+            self.channel_members[chan_name].append(client_id)
 
         if is_provider:
-            if not event: return
+            if not event:
+                await self._send_to_client(client_id, {
+                    "type": "response",
+                    "request_id": reg.get("request_id"),
+                    "error": "Event name required for provider registration"
+                })
+                return
             if chan_name in self.providers and event in self.providers[chan_name]:
                 existing_provider = self.providers[chan_name][event]
                 if existing_provider != client_id:
                     err_msg = f"Provider already exists for {chan_name}:{event} (by {existing_provider})"
-                    await self._send_to_client(client_id, {"type": "error", "message": err_msg})
+                    await self._send_to_client(client_id, {
+                        "type": "response",
+                        "request_id": reg.get("request_id"),
+                        "channel": chan_name,
+                        "event": event,
+                        "error": err_msg
+                    })
                     await self._report_error(Exception(err_msg), client_id)
                     return
             
@@ -248,13 +309,55 @@ class CommIPCServer:
             }
         })
 
+        await self._send_to_client(client_id, {
+            "type": "response",
+            "request_id": reg.get("request_id"),
+            "channel": chan_name,
+            "event": event,
+            "data": {
+                "channel": chan_name,
+                "event": event,
+                "authenticated": (chan_name in self.channel_passwords)
+            }
+        })
+
     async def _handle_set_password(self, client_id: str, msg: Dict):
         chan = msg.get("channel")
         pwd = msg.get("password")
-        if chan in self.channel_passwords:
-            await self._report_error(Exception("Channel password already set"), client_id)
+        rid = msg.get("request_id")
+        
+        if chan in self.channel_members and self.channel_members[chan][0] != client_id:
+            if rid:
+                await self._send_to_client(client_id, {
+                    "type": "response",
+                    "request_id": rid,
+                    "error": "Only the channel owner can set or change the password"
+                })
+            await self._report_error(Exception("Only the channel owner can set or change the password"), client_id)
             return
-        self.channel_passwords[chan] = pwd
+
+        if chan not in self.channel_members:
+            self.channel_members[chan] = [client_id]
+
+        old_pwd = self.channel_passwords.get(chan)
+        if pwd != old_pwd:
+            self.channel_passwords[chan] = pwd
+            others = [cid for cid in self.channel_members.get(chan, []) if cid != client_id]
+            for cid in others:
+                if cid in self.clients:
+                    await self._send_to_client(cid, {"type": "error", "message": "Channel password changed, please reconnect"})
+                    if chan in self.channels and cid in self.channels[chan]:
+                        self.channels[chan].remove(cid)
+                    if chan in self.providers:
+                        events_to_remove = [ev for ev, pid in self.providers[chan].items() if pid == cid]
+                        for ev in events_to_remove: del self.providers[chan][ev]
+
+        if rid:
+            await self._send_to_client(client_id, {
+                "type": "response",
+                "request_id": rid,
+                "data": {"success": True}
+            })
 
     async def _handle_call(self, client_id: str, msg: Dict):
         chan = msg.get("channel")
@@ -295,7 +398,8 @@ class CommIPCServer:
 
     async def _handle_broadcast(self, client_id: str, msg: Dict):
         chan = msg.get("channel")
-        if not self._prepare_message(msg, client_id): return
+        if not self._prepare_message(msg, client_id):
+            return
         if chan in self.channels:
             for tid in self.channels[chan]:
                 if tid != client_id:
@@ -409,7 +513,6 @@ class CommIPCServer:
                 self._cleanup_task.cancel()
 
     async def stop(self):
-        """Stop the server and cleanup tasks."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
             try:

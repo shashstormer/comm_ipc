@@ -41,7 +41,8 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
         
         try:
             await c_bad.connect()
-            await c_bad.open("secure", password="wrong")
+            with self.assertRaisesRegex(Exception, "Invalid channel password"):
+                await c_bad.open("secure", password="wrong")
             
             await provider.connect()
             ch_admin = await provider.open("secure", password="1234")
@@ -70,7 +71,8 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
         ch2 = await c2.open("dup_chan")
                                                                                                                             
                                                                                           
-        await ch2.add_event("event1", call=lambda _: "fail")
+        with self.assertRaisesRegex(Exception, "Provider already exists"):
+            await ch2.add_event("event1", call=lambda _: "fail")
         
         self.assertEqual(len(self.server.providers["dup_chan"]), 1)
         self.assertEqual(self.server.providers["dup_chan"]["event1"], "p1")
@@ -78,21 +80,18 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
         await c1.close()
         await c2.close()
 
-    async def test_duplicate_password_set(self):
-        err_event = asyncio.Event()
-        async def on_err(e):
-            if "already set" in str(e): err_event.set()
-        client = CommIPC(on_error=on_err, socket_path=self.socket_path)
-        await client.connect()
-        print("[DEBUG] sending first set_password")
-        await client.send_msg({"type": "set_password", "channel": "sec", "password": "p1"})
-        await asyncio.sleep(0.2)
-        print("[DEBUG] sending second set_password")
-        await client.send_msg({"type": "set_password", "channel": "sec", "password": "p2"})
-        print("[DEBUG] waiting for error event")
-        await asyncio.wait_for(err_event.wait(), timeout=3.0)
-        print("[DEBUG] error event received!")
-        await client.close()
+    async def test_unauthorized_password_set(self):
+        c1 = CommIPC(client_id="owner", socket_path=self.socket_path)
+        await c1.open("sec")
+        await c1.set_password("sec", "p1")
+        
+        c2 = CommIPC(client_id="intruder", socket_path=self.socket_path)
+        await c2.open("sec", password="p1")
+        with self.assertRaisesRegex(Exception, "Only the channel owner"):
+            await c2.set_password("sec", "p2")
+        
+        await c1.close()
+        await c2.close()
 
 if __name__ == "__main__":
     unittest.main()

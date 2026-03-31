@@ -86,7 +86,8 @@ class TestCoverageEdge(unittest.IsolatedAsyncioTestCase):
         
         c3 = CommIPC(client_id="p3", socket_path=self.socket_path)
         ch3 = await c3.open("chan1")
-        await ch3.add_event("ev1", call=lambda cd: "fail")
+        with self.assertRaisesRegex(Exception, "Provider already exists"):
+            await ch3.add_event("ev1", call=lambda cd: "fail")
         
         await c1.close()
         await c3.close()
@@ -98,7 +99,7 @@ class TestCoverageEdge(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
              await ch.handle_call(CommData(sender_id="s", server_id="srv", channel="more", event="bad", data={}))
              
-        await client.open("more", password="new")
+        await client.set_password("more", "new")
         self.assertEqual(ch.password, "new")
         
         err_received = asyncio.Event()

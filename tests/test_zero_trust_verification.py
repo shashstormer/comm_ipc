@@ -37,8 +37,11 @@ class TestZeroTrust(unittest.IsolatedAsyncioTestCase):
         c1 = CommIPC(client_id="sender", socket_path=self.socket_path, connection_secret=self.secret)
         c2 = CommIPC(client_id="receiver", socket_path=self.socket_path, connection_secret=self.secret)
         
-        ch1 = await c1.open("secure-chan", password="chan-password")
+        ch1 = await c1.open("secure-chan")
+        await c1.set_password("secure-chan", "chan-password")
+        
         ch2 = await c2.open("secure-chan", password="chan-password")
+        
         
         received_event = asyncio.Event()
         received_data = None
@@ -62,24 +65,16 @@ class TestZeroTrust(unittest.IsolatedAsyncioTestCase):
         c1 = CommIPC(client_id="sender", socket_path=self.socket_path, connection_secret=self.secret)
         c2 = CommIPC(client_id="receiver", socket_path=self.socket_path, connection_secret=self.secret)
         
-        ch1 = await c1.open("secure-chan", password="chan-password")
-        ch2 = await c2.open("secure-chan", password="wrong-password")
+        await c1.connect()
+        await c2.connect()
         
-        received_event = asyncio.Event()
+        ch1 = await c1.open("secure-chan")
+        await c1.set_password("secure-chan", "chan-password")
+        ch1.password = "chan-password"
         
-        async def on_recv(_):
-            received_event.set()
-            
-        ch2.on_receive(on_recv)
-        await asyncio.sleep(0.1)
+        with self.assertRaisesRegex(Exception, "Invalid channel password"):
+            await c2.open("secure-chan", password="wrong-password")
         
-        await ch1.broadcast("test-event", {"hello": "world"})
-        try:
-            await asyncio.wait_for(received_event.wait(), timeout=1.0)
-            self.fail("Should not have received message with wrong signature")
-        except asyncio.TimeoutError:
-            pass # Success
-            
         await c1.close()
         await c2.close()
 
@@ -95,7 +90,6 @@ class TestZeroTrust(unittest.IsolatedAsyncioTestCase):
         
         await asyncio.sleep(0.1)
         
-        # Bridge only 'allowed' channel
         bridge = CommIPCBridge(socket_path1=s1_path, socket_path2=s2_path, allowed_channels=["allowed"])
         await bridge.connect({}, {})
         
@@ -106,14 +100,11 @@ class TestZeroTrust(unittest.IsolatedAsyncioTestCase):
         await c2.open("allowed")
         await c2.open("forbidden")
         
-        # Wait for sync
         await asyncio.sleep(0.2)
         
-        # Check that 'allowed' is bridged
         self.assertIn("allowed", bridge.synced_channels["c1"])
         self.assertIn("allowed", bridge.synced_channels["c2"])
         
-        # Check that 'forbidden' is NOT bridged
         self.assertNotIn("forbidden", bridge.synced_channels["c1"])
         
         await bridge.stop()

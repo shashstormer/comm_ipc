@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import time
 import uuid
-from typing import Callable, Dict, Any, List, Union, get_origin, get_args
+from typing import Callable, Dict, Any, List, Union, get_origin, get_args, Optional
 
 from comm_ipc.comm_data import CommData
 from comm_ipc import security
@@ -12,11 +12,24 @@ class CommIPCChannel:
     def __init__(self, name: str, parent: 'CommIPC', password: str = None):
         self.name = name
         self.parent = parent
+        self._password = None
+        self.message_key = None
         self.password = password
-        self.message_key = security.derive_key(password, name.encode()) if password else None
         self.events: Dict[str, Dict[str, Any]] = {}
         self.listeners: Dict[str, List[Callable]] = {}
         self.generic_listeners: List[Callable] = []
+
+    @property
+    def password(self) -> Optional[str]:
+        return self._password
+
+    @password.setter
+    def password(self, val: str):
+        self._password = val
+        if val:
+            self.message_key = security.derive_key(val, self.name.encode())
+        else:
+            self.message_key = None
 
     @staticmethod
     def validate_data(data: Any, schema: Dict[str, Any]):
@@ -27,7 +40,6 @@ class CommIPCChannel:
 
         for key, expected_type in schema.items():
             if key not in data:
-
                 if get_origin(expected_type) is Union and type(None) in get_args(expected_type):
                     continue
                 raise ValueError(f"Missing required parameter: {key}")
@@ -60,14 +72,24 @@ class CommIPCChannel:
         if call not in self.listeners[name]:
             self.listeners[name].append(call)
 
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.parent.pending_calls[rid] = fut
+
         await self.parent.send_msg({
             "type": "register",
+            "request_id": rid,
             "client_id": self.parent.client_id,
             "channel": self.name,
             "is_provider": True,
             "event": name,
             "is_stream": is_stream
         })
+
+        try:
+            await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            raise Exception(f"Registration for event {self.name}:{name} timed out")
 
     async def _create_message(self, msg_type: str, event_name: str, data: Any, request_id: str = None) -> Dict:
         msg = {

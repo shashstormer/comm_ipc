@@ -10,7 +10,7 @@ class CommData:
     channel: str
     event: str
     data: Any
-    timestamp: float = field(default_factory=time.time)
+    timestamp: int = field(default_factory=lambda: int(time.time()))
     metadata: Dict[str, Any] = field(default_factory=dict)
     request_id: Optional[str] = None
     target_id: Optional[str] = None
@@ -46,7 +46,7 @@ class CommData:
             channel=d.get("channel", ""),
             event=d.get("event", ""),
             data=d.get("data"),
-            timestamp=d.get("timestamp", time.time()),
+            timestamp=int(d.get("timestamp", time.time())),
             metadata=d.get("metadata", {}),
             request_id=d.get("request_id"),
             target_id=d.get("target_id"),

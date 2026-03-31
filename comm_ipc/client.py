@@ -14,14 +14,18 @@ from comm_ipc import security
 
 
 class CommIPC:
-    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, ssl_context=None, connection_secret: str = None):
+    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, 
+                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.on_error = on_error
         self.ssl_context = ssl_context
         self.connection_secret = connection_secret
+        self.auto_reconnect = auto_reconnect
+        self.reconnect_max_tries = reconnect_max_tries
+        self._reconnect_count = 0
         self.server_id: Optional[str] = None
-        self.channels: Dict[str, CommIPCChannel] = {}
+        self.channels: Dict[str, 'CommIPCChannel'] = {}
         self.active_streams: Dict[str, asyncio.Queue] = {}
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
@@ -29,27 +33,38 @@ class CommIPC:
         self._loop_task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()
         self.on_msg: Optional[Callable[[Dict], Any]] = None
+        self._host = None
+        self._port = None
 
     async def connect(self, host: str = None, port: int = None, ssl_context=None, connection_secret: str = None):
         if connection_secret:
             self.connection_secret = connection_secret
             
+        self._host = host or self._host
+        self._port = port or self._port
+
         if self.writer:
             return
 
         ctx = ssl_context or self.ssl_context
-        if host and port:
-            self.reader, self.writer = await asyncio.open_connection(host, port, ssl=ctx)
+        if self._host and self._port:
+            self.reader, self.writer = await asyncio.open_connection(self._host, self._port, ssl=ctx)
         else:
             self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
 
         print(f"[CLIENT {self.client_id}] Connecting to server...")
         await self.send_msg({"type": "identify", "client_id": self.client_id})
 
-        len_data = await self.reader.readexactly(4)
-        length = struct.unpack(">I", len_data)[0]
-        data = await self.reader.readexactly(length)
-        resp = json.loads(data.decode())
+        try:
+            len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=5.0)
+            length = struct.unpack(">I", len_data)[0]
+            data = await asyncio.wait_for(self.reader.readexactly(length), timeout=5.0)
+            resp = json.loads(data.decode())
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+            if self.writer: 
+                self.writer.close()
+                self.writer = None
+            raise ConnectionError("Timeout or connection lost during identification")
 
         if resp.get("type") == "conn_challenge":
             if not self.connection_secret:
@@ -77,12 +92,15 @@ class CommIPC:
     async def _listen_loop(self):
         try:
             while True:
-                len_data = await self.reader.readexactly(4)
-                if not len_data: break
-                length = struct.unpack(">I", len_data)[0]
-                data = await self.reader.readexactly(length)
-                msg = json.loads(data.decode())
-                asyncio.create_task(self._handle_message(msg))
+                try:
+                    len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=5.0)
+                    if not len_data: break
+                    length = struct.unpack(">I", len_data)[0]
+                    data = await asyncio.wait_for(self.reader.readexactly(length), timeout=5.0)
+                    msg = json.loads(data.decode())
+                    asyncio.create_task(self._handle_message(msg))
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                    break
         except (asyncio.IncompleteReadError, asyncio.CancelledError):
             pass
         except Exception as e:
@@ -93,12 +111,57 @@ class CommIPC:
                     self.on_error(e)
         finally:
             self._ready.clear()
-            for rid, fut in self.pending_calls.items():
+            for rid, fut in list(self.pending_calls.items()):
                 if not fut.done():
                     fut.set_exception(ConnectionResetError("Connection lost before response was received"))
             self.pending_calls.clear()
             if self.writer:
                 self.writer.close()
+                self.writer = None
+            self.reader = None
+
+            if self.auto_reconnect and (not self._loop_task or not self._loop_task.cancelled()):
+                 asyncio.create_task(self._reconnect())
+
+    async def _reconnect(self):
+        delay = 1
+        while self.auto_reconnect:
+            if self.reconnect_max_tries > 0 and self._reconnect_count >= self.reconnect_max_tries:
+                print(f"[CLIENT {self.client_id}] Max reconnection attempts reached.")
+                break
+            
+            try:
+                self._reconnect_count += 1
+                print(f"[CLIENT {self.client_id}] Reconnecting (attempt {self._reconnect_count})...")
+                await asyncio.sleep(delay)
+                await self.connect()
+                await self._restore_state()
+                self._reconnect_count = 0
+                print(f"[CLIENT {self.client_id}] Reconnection successful.")
+                break
+            except Exception as e:
+                if "Authentication failed" in str(e) or "Invalid channel password" in str(e):
+                    print(f"[CLIENT {self.client_id}] Critical auth failure, stopping reconnection.")
+                    break
+                print(f"[CLIENT {self.client_id}] Reconnection failed: {e}. Retrying in {delay}s...")
+                delay = min(delay * 2, 60)
+
+    async def _restore_state(self):
+        for chan in list(self.channels.values()):
+            await self.send_msg({
+                "type": "register",
+                "client_id": self.client_id,
+                "channel": chan.name
+            })
+            for name, info in chan.events.items():
+                await self.send_msg({
+                    "type": "register",
+                    "client_id": self.client_id,
+                    "channel": chan.name,
+                    "is_provider": True,
+                    "event": name,
+                    "is_stream": info.get("is_stream", False)
+                })
 
     async def _handle_message(self, msg: Dict):
         if self.on_msg:
@@ -202,6 +265,7 @@ class CommIPC:
             chan_name = msg.get("channel")
             challenge = msg.get("challenge")
             challenge_id = msg.get("challenge_id")
+            rid = msg.get("request_id")
             
             if chan_name in self.channels:
                 chan = self.channels[chan_name]
@@ -214,11 +278,16 @@ class CommIPC:
                     
                     await self.send_msg({
                         "type": "register",
+                        "request_id": rid,
                         "client_id": self.client_id,
                         "channel": chan_name,
                         "proof": proof,
                         "challenge_id": challenge_id
                     })
+                else:
+                    if rid in self.pending_calls:
+                        fut = self.pending_calls.pop(rid)
+                        fut.set_exception(Exception(f"Channel {chan_name} requires authentication, but no password was provided."))
 
         elif mtype == "error":
             mtext = msg.get('message', 'Unknown server error')
@@ -254,13 +323,48 @@ class CommIPC:
             channel = self.channels[chan]
             channel.password = password
 
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+
         await self.send_msg({
             "type": "register",
+            "request_id": rid,
             "client_id": self.client_id,
             "channel": chan,
             "is_provider": False
         })
+        
+        try:
+            resp = await asyncio.wait_for(fut, timeout=10.0)
+            if password and not resp.data.get("authenticated"):
+                 print(f"[CLIENT {self.client_id}] Rejecting unprotected channel {chan}")
+                 if chan in self.channels: del self.channels[chan]
+                 raise Exception(f"Channel {chan} is unprotected, but a password was provided.")
+        except asyncio.TimeoutError:
+            if chan in self.channels: del self.channels[chan]
+            raise Exception(f"Registration for channel {chan} timed out")
+
         return self.channels[chan]
+
+    async def set_password(self, chan: str, password: str):
+        if not self._ready.is_set():
+            await self.connect()
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+        
+        await self.send_msg({
+            "type": "set_password",
+            "channel": chan,
+            "password": password,
+            "request_id": rid
+        })
+        
+        resp = await fut
+        if chan in self.channels:
+            self.channels[chan].password = password
+        return resp
 
     async def call(self, chan: str, ev: str, data: Any) -> Any:
         if not self._ready.is_set():

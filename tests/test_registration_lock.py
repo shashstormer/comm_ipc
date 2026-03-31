@@ -36,16 +36,10 @@ class TestRegistrationLock(unittest.IsolatedAsyncioTestCase):
             if "Provider already exists" in str(err):
                 error_received.set()
         client_b.on_error = on_error
-        
         chan_b = await client_b.open("lock_chan")
-        await chan_b.add_event("ev1", call=handler)
+        with self.assertRaisesRegex(Exception, "Provider already exists"):
+            await chan_b.add_event("ev1", call=handler)
         
-        try:
-            await asyncio.wait_for(error_received.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-            self.fail("Did not receive 'Provider already exists' error")
-        self.assertTrue(error_received.is_set())
-
         await client_a.close()
         await asyncio.sleep(0.5)
 

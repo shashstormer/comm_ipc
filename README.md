@@ -17,15 +17,16 @@ CommIPC is an asynchronous Inter-Process Communication (IPC) system designed for
 
 ## Key Features
 
-- **Asynchronous Design**: Supports low-latency communication using the Python `asyncio` framework.
-- **Multi-Layer Security**: 
-    - **Authenticated Channels**: Secure specific events using channel-level password protection.
-    - **Global identity Management**: Server-enforced unique client identifiers across the entire distributed network.
-    - **Automatic Identification**: Support for server-assigned identifiers for dynamic client registration.
-- **Distributed Bridging**: Interconnect multiple IPC servers across different networks or VPS instances with transparent, bi-directional message relaying.
-- **Asynchronous Streaming**: Efficient support for asynchronous data streams (generators) across both local and remote connections.
-- **Standardized Messaging**: Utilizes a robust communication standard for comprehensive message traceability and metadata propagation.
-- **Origin Traceability**: Comprehensive tracking of message origins and relay paths to prevent infinite loops in distributed topologies.
+- **Zero-Trust Security**:
+    - **HMAC-SHA256 Handshake**: Mandatory cryptographic challenge for every client connection.
+    - **End-to-End Signature**: All channel messages are signed with HMAC-SHA256 based on channel passwords, ensuring data integrity even if the server is compromised.
+- **Advanced Channel Management**:
+    - **Owner-Based Administration**: The first client to join a channel is the Admin/Owner, with exclusive rights to manage security.
+    - **Explicit Password Protection**: Support for protecting channels (including system channels) with unique, cryptographically derived keys.
+    - **Flexible Lifecycle Policies**: Configurable policies for handling owner disconnection (`terminate` or `promote`).
+- **High Resilience**:
+    - **Auto-Reconnect**: Robust reconnection logic with exponential backoff and transparent state restoration (channels, providers).
+    - **Synchronous Persistence**: Client APIs wait for server confirmation for registrations and security changes, preventing communication hangs.
 - **Dependency-Free**: Implemented entirely using the Python standard library, requiring no external packages.
 
 ## Architecture Overview
@@ -136,11 +137,29 @@ await bridge.connect(
 )
 ```
 
-## Performance and Scalability
+### Security & Channel Management
 
-CommIPC is designed for environments where low overhead is important. By utilizing Unix Domain Sockets for local-host communication, it avoids the overhead of the network stack for co-located processes.
+#### Protecting a Channel (Owner)
 
-The bridge architecture facilitates horizontal scaling, allowing for the creation of unified IPC namespaces that span multiple physical or virtual hosts without application-level logic changes.
+```python
+# The first client to open the channel becomes the owner
+channel = await client.open("secure-data")
+await client.set_password("secure-data", "strong-password")
+```
+
+#### Joining a Protected Channel
+
+```python
+# Fails if password is wrong or missing
+channel = await client.open("secure-data", password="strong-password")
+```
+
+## Performance and Resilience
+
+CommIPC is optimized for reliability:
+- **Auto-Reconnect**: Automatically recovers from server restarts and network interruptions.
+- **State Preservation**: Transparently restores all active channel memberships and event providers after a reconnection event.
+- **Unix Domain Sockets**: Minimizes latency for local-host communication by bypassing the network stack.
 
 ## Testing
 
@@ -152,10 +171,11 @@ PYTHONPATH=. pytest tests/
 ```
 
 The test coverage includes:
-- **Core Protocol**: RPC mechanisms, broadcast patterns, and direct messaging.
-- **Security Protocols**: Identifier collision prevention and channel authentication.
-- **Distributed Systems**: Message relay efficiency, bridge synchronization, and circular path detection.
-- **Streaming Logic**: Local and cross-server asynchronous iterator support.
+- **Zero-Trust Verification**: HMAC handshakes, signature integrity, and E2E verification.
+- **Advanced Management**: Ownership logic, lifecycle policies, and resource cleanup.
+- **Resilience**: Auto-reconnect stability and state restoration.
+- **Distributed Systems**: Bridge synchronization and circular path detection.
+- **Streaming**: Asynchronous iterator support across local and remote instances.
 
 ## License
 
