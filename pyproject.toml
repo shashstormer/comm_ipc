@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comm-ipc"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
     { name="shashstormer", email="shashanka5398@gmail.com" },
 ]
@@ -20,4 +20,3 @@ test = ["pytest", "pytest-asyncio"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["comm_ipc"]
-

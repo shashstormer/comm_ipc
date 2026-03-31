@@ -8,14 +8,17 @@ import inspect
 from typing import Dict, Any, Optional, Callable
 
 from comm_ipc.channel import CommIPCChannel
-from comm_ipc.config import SOCKET_PATH
+from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIMEOUT, DEFAULT_HEARTBEAT_INTERVAL
 from comm_ipc.comm_data import CommData
 from comm_ipc import security
 
 
 class CommIPC:
     def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, 
-                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0, verbose: bool = False):
+                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0,
+                 idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
+                 heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+                 verbose: bool = False):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.on_error = on_error
@@ -24,6 +27,10 @@ class CommIPC:
         self.auto_reconnect = auto_reconnect
         self.reconnect_max_tries = reconnect_max_tries
         self.verbose = verbose
+        self.idle_timeout = idle_timeout
+        self.data_timeout = data_timeout
+        self.heartbeat_interval = heartbeat_interval
+        self._is_closing = False
         self._reconnect_count = 0
         self.server_id: Optional[str] = None
         self.channels: Dict[str, 'CommIPCChannel'] = {}
@@ -32,6 +39,7 @@ class CommIPC:
         self.writer: Optional[asyncio.StreamWriter] = None
         self.pending_calls: Dict[str, asyncio.Future] = {}
         self._loop_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()
         self.on_msg: Optional[Callable[[Dict], Any]] = None
         self._host = None
@@ -61,9 +69,9 @@ class CommIPC:
         await self.send_msg({"type": "identify", "client_id": self.client_id})
 
         try:
-            len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=5.0)
+            len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
             length = struct.unpack(">I", len_data)[0]
-            data = await asyncio.wait_for(self.reader.readexactly(length), timeout=5.0)
+            data = await asyncio.wait_for(self.reader.readexactly(length), timeout=self.data_timeout)
             resp = json.loads(data.decode())
         except (asyncio.TimeoutError, asyncio.IncompleteReadError):
             if self.writer: 
@@ -92,16 +100,17 @@ class CommIPC:
             raise Exception(f"Connection failed: {resp.get('message')}")
 
         self._loop_task = asyncio.create_task(self._listen_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat())
         self._ready.set()
 
     async def _listen_loop(self):
         try:
             while True:
                 try:
-                    len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=5.0)
+                    len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
                     if not len_data: break
                     length = struct.unpack(">I", len_data)[0]
-                    data = await asyncio.wait_for(self.reader.readexactly(length), timeout=5.0)
+                    data = await asyncio.wait_for(self.reader.readexactly(length), timeout=self.data_timeout)
                     msg = json.loads(data.decode())
                     asyncio.create_task(self._handle_message(msg))
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
@@ -125,7 +134,9 @@ class CommIPC:
                 self.writer = None
             self.reader = None
 
-            if self.auto_reconnect and (not self._loop_task or not self._loop_task.cancelled()):
+            if self._heartbeat_task:
+                self._heartbeat_task.cancel()
+            if self.auto_reconnect and not self._is_closing:
                  asyncio.create_task(self._reconnect())
 
     async def _reconnect(self):
@@ -133,6 +144,7 @@ class CommIPC:
         while self.auto_reconnect:
             if self.reconnect_max_tries > 0 and self._reconnect_count >= self.reconnect_max_tries:
                 self._log("Max reconnection attempts reached.")
+                await self.close()
                 break
             
             try:
@@ -150,6 +162,17 @@ class CommIPC:
                     break
                 self._log(f"Reconnection failed: {e}. Retrying in {delay}s...")
                 delay = min(delay * 2, 60)
+
+    async def _heartbeat(self):
+        try:
+            while True:
+                await asyncio.sleep(self.heartbeat_interval)
+                if self.writer:
+                    await self.send_msg({"type": "ping"})
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self._log(f"Heartbeat failed: {e}")
 
     async def _restore_state(self):
         for chan in list(self.channels.values()):
@@ -415,13 +438,45 @@ class CommIPC:
             if rid in self.active_streams:
                 del self.active_streams[rid]
 
+    async def wait_till_end(self):
+        """
+        Wait until the client is closed or reconnection attempts are exhausted.
+        This provides a clean way to keep a script running while the client processes messages.
+        If the outer task is cancelled (e.g. via Ctrl+C in asyncio.run), this will 
+        automatically call close() and return cleanly.
+        """
+        try:
+            while not self._is_closing:
+                if self._loop_task:
+                    if self._loop_task.done():
+                        await asyncio.sleep(0.5)
+                        continue
+                    try:
+                        await asyncio.shield(self._loop_task)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        if not self.auto_reconnect:
+                            await self.close()
+                            break
+                        await asyncio.sleep(1.0)
+                else:
+                    if self._is_closing:
+                        break
+                    await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            await self.close()
+
     async def close(self):
+        self._is_closing = True
         if self._loop_task:
             self._loop_task.cancel()
             try:
                 await self._loop_task
             except (asyncio.CancelledError, asyncio.IncompleteReadError):
                 pass
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
         if self.writer:
             try:
                 self.writer.close()

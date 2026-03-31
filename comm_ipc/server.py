@@ -10,14 +10,16 @@ import uuid
 import time
 from typing import Dict, Any, List, Set
 
-from comm_ipc.config import SOCKET_PATH
+from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIMEOUT
 from comm_ipc import security
 
 
 class CommIPCServer:
     def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, 
                  error_policy: str = "ignore", connection_secret: str = None,
-                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate", verbose: bool = False):
+                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate", 
+                 idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
+                 verbose: bool = False):
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.clients: Dict[str, asyncio.StreamWriter] = {}
@@ -33,6 +35,8 @@ class CommIPCServer:
         self.auth_challenges: Dict[str, Dict[str, Any]] = {}
         self.connection_secret_hash = security.hash_secret(connection_secret) if connection_secret else None
         self.unauthenticated_clients: Set[asyncio.StreamWriter] = set()
+        self.idle_timeout = idle_timeout
+        self.data_timeout = data_timeout
         self._cleanup_task = None
         
     def _log(self, message: str, level: str = "info", client_id: str = None):
@@ -122,14 +126,18 @@ class CommIPCServer:
 
             while True:
                 try:
-                    len_data = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
+                    len_data = await asyncio.wait_for(reader.readexactly(4), timeout=self.idle_timeout)
                     if not len_data: break
                     length = struct.unpack(">I", len_data)[0]
-                    data = await asyncio.wait_for(reader.readexactly(length), timeout=5.0)
+                    data = await asyncio.wait_for(reader.readexactly(length), timeout=self.data_timeout)
                     msg = json.loads(data.decode())
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                     break
                 
+                if msg.get("type") == "ping":
+                    await self._send_to_writer(writer, {"type": "pong"})
+                    continue
+
                 if self.connection_secret_hash:
                     if not self.auth_challenges.get(client_id, {}).get("authenticated"):
                         await self._send_to_writer(writer, {"type": "error", "message": "Not authenticated"})
