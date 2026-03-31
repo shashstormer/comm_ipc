@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import struct
 import uuid
@@ -8,25 +10,30 @@ from typing import Dict, Any, Optional, Callable
 from comm_ipc.channel import CommIPCChannel
 from comm_ipc.config import SOCKET_PATH
 from comm_ipc.comm_data import CommData
+from comm_ipc import security
 
 
 class CommIPC:
-    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, ssl_context=None):
+    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, ssl_context=None, connection_secret: str = None):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.on_error = on_error
         self.ssl_context = ssl_context
+        self.connection_secret = connection_secret
         self.server_id: Optional[str] = None
         self.channels: Dict[str, CommIPCChannel] = {}
         self.active_streams: Dict[str, asyncio.Queue] = {}
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
-        self._pending_calls: Dict[str, asyncio.Future] = {}
+        self.pending_calls: Dict[str, asyncio.Future] = {}
         self._loop_task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()
         self.on_msg: Optional[Callable[[Dict], Any]] = None
 
-    async def connect(self, host: str = None, port: int = None, ssl_context=None):
+    async def connect(self, host: str = None, port: int = None, ssl_context=None, connection_secret: str = None):
+        if connection_secret:
+            self.connection_secret = connection_secret
+            
         if self.writer:
             return
 
@@ -36,6 +43,7 @@ class CommIPC:
         else:
             self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
 
+        print(f"[CLIENT {self.client_id}] Connecting to server...")
         await self.send_msg({"type": "identify", "client_id": self.client_id})
 
         len_data = await self.reader.readexactly(4)
@@ -43,9 +51,23 @@ class CommIPC:
         data = await self.reader.readexactly(length)
         resp = json.loads(data.decode())
 
+        if resp.get("type") == "conn_challenge":
+            if not self.connection_secret:
+                raise Exception("Server required connection secret but none provided")
+            challenge = resp.get("challenge")
+            secret_hash = security.hash_secret(self.connection_secret)
+            proof = security.compute_signature(secret_hash.encode(), {"challenge": challenge})
+            await self.send_msg({"type": "conn_proof", "proof": proof})
+            
+            len_data = await self.reader.readexactly(4)
+            length = struct.unpack(">I", len_data)[0]
+            data = await self.reader.readexactly(length)
+            resp = json.loads(data.decode())
+
         if resp.get("type") == "identified":
             self.client_id = resp.get("client_id")
             self.server_id = resp.get("server_id")
+            print(f"[CLIENT {self.client_id}] Identified by server {self.server_id}")
         elif resp.get("type") == "error":
             raise Exception(f"Connection failed: {resp.get('message')}")
 
@@ -71,10 +93,10 @@ class CommIPC:
                     self.on_error(e)
         finally:
             self._ready.clear()
-            for rid, fut in self._pending_calls.items():
+            for rid, fut in self.pending_calls.items():
                 if not fut.done():
                     fut.set_exception(ConnectionResetError("Connection lost before response was received"))
-            self._pending_calls.clear()
+            self.pending_calls.clear()
             if self.writer:
                 self.writer.close()
 
@@ -89,8 +111,8 @@ class CommIPC:
             rid = msg.get("request_id")
             if rid in self.active_streams:
                 await self.active_streams[rid].put(msg)
-            elif rid in self._pending_calls:
-                fut = self._pending_calls.pop(rid)
+            elif rid in self.pending_calls:
+                fut = self.pending_calls.pop(rid)
                 if "error" in msg:
                     fut.set_exception(Exception(msg["error"]))
                 else:
@@ -108,16 +130,15 @@ class CommIPC:
                 chan = self.channels[chan_name]
                 rid = msg.get("request_id")
                 ev = msg.get("event")
-                cd = CommData.from_dict(msg)
 
                 async def handle():
+                    i_cd = CommData.from_dict(msg)
                     try:
                         hinfo = chan.events.get(ev)
                         h = hinfo["call"] if hinfo else None
                         if h:
-                            cd = CommData.from_dict(msg)
                             if inspect.isasyncgenfunction(h):
-                                async for chunk in h(cd):
+                                async for chunk in h(i_cd):
                                     resp = CommData(
                                         sender_id=self.client_id,
                                         server_id=self.server_id or "",
@@ -125,7 +146,7 @@ class CommIPC:
                                         event=ev,
                                         data=chunk,
                                         request_id=rid,
-                                        target_id=cd.sender_id,
+                                        target_id=i_cd.sender_id,
                                         is_stream=True,
                                         is_final=False
                                     )
@@ -140,7 +161,7 @@ class CommIPC:
                                     event=ev,
                                     data=None,
                                     request_id=rid,
-                                    target_id=cd.sender_id,
+                                    target_id=i_cd.sender_id,
                                     is_stream=True,
                                     is_final=True
                                  )
@@ -148,24 +169,24 @@ class CommIPC:
                                 final_dict["type"] = "response"
                                 await self.send_msg(final_dict)
                             else:
-                                res = await chan.handle_call(cd)
+                                res = await chan.handle_call(i_cd)
                                 await self.send_msg({
                                     "type": "response",
                                     "request_id": rid,
-                                    "target_id": cd.sender_id,
+                                    "target_id": i_cd.sender_id,
                                     "data": res
                                 })
-                    except Exception as e:
+                    except Exception as i_e:
                         if self.on_error:
                             if inspect.iscoroutinefunction(self.on_error):
-                                await self.on_error(e)
+                                await self.on_error(i_e)
                             else:
-                                self.on_error(e)
+                                self.on_error(i_e)
                         await self.send_msg({
                             "type": "response",
                             "request_id": rid,
-                            "target_id": cd.sender_id,
-                            "error": str(e)
+                            "target_id": i_cd.sender_id,
+                            "error": str(i_e)
                         })
 
                 asyncio.create_task(handle())
@@ -178,8 +199,6 @@ class CommIPC:
                 await chan.handle_receive(cd)
 
         elif mtype == "auth_challenge":
-            import hmac
-            import hashlib
             chan_name = msg.get("channel")
             challenge = msg.get("challenge")
             challenge_id = msg.get("challenge_id")
@@ -248,7 +267,7 @@ class CommIPC:
             await self.connect()
         rid = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
-        self._pending_calls[rid] = fut
+        self.pending_calls[rid] = fut
         await self.send_msg({
             "type": "call",
             "channel": chan,
@@ -264,7 +283,7 @@ class CommIPC:
         if not self._ready.is_set():
             await self.connect()
         rid = str(uuid.uuid4())
-        self.active_streams[rid] = asyncio.Queue()
+        self.active_streams[rid] = asyncio.Queue(maxsize=1000)
         await self.send_msg({
             "type": "call",
             "channel": chan,
@@ -279,9 +298,10 @@ class CommIPC:
                 resp = await self.active_streams[rid].get()
                 if resp.get("error"):
                     raise Exception(resp["error"])
+                if resp.get("data") is not None:
+                    yield CommData.from_dict(resp)
                 if resp.get("is_final"):
                     break
-                yield CommData.from_dict(resp)
         finally:
             if rid in self.active_streams:
                 del self.active_streams[rid]

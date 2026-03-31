@@ -1,9 +1,10 @@
 import asyncio
-import unittest
 import os
-from tests.base import start_test_server, stop_test_server
+import unittest
+
 from comm_ipc.client import CommIPC
-from comm_ipc.comm_data import CommData
+from tests.base import start_test_server, stop_test_server
+
 
 class TestRegistrationLock(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -21,7 +22,7 @@ class TestRegistrationLock(unittest.IsolatedAsyncioTestCase):
         await client_a.connect()
         chan_a = await client_a.open("lock_chan")
         
-        async def handler(cd: CommData):
+        async def handler(_):
             return "ok"
         
         await chan_a.add_event("ev1", call=handler)

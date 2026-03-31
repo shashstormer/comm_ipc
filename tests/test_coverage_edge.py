@@ -1,11 +1,13 @@
 import asyncio
-import unittest
 import os
-from typing import Union, Optional, List
-from tests.base import start_test_server, stop_test_server
+import unittest
+from typing import Union, Optional
+
+from comm_ipc.bridge import CommIPCBridge
 from comm_ipc.client import CommIPC
 from comm_ipc.comm_data import CommData
-from comm_ipc.bridge import CommIPCBridge
+from tests.base import start_test_server, stop_test_server
+
 
 class TestCoverageEdge(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

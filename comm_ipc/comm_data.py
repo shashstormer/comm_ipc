@@ -17,6 +17,8 @@ class CommData:
     path: List[str] = field(default_factory=list)
     is_stream: bool = False
     is_final: bool = True
+    signature: Optional[str] = None
+    origin_server_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,7 +33,9 @@ class CommData:
             "target_id": self.target_id,
             "path": self.path,
             "is_stream": self.is_stream,
-            "is_final": self.is_final
+            "is_final": self.is_final,
+            "signature": self.signature,
+            "origin_server_id": self.origin_server_id
         }
 
     @classmethod
@@ -48,5 +52,7 @@ class CommData:
             target_id=d.get("target_id"),
             path=d.get("path", []),
             is_stream=bool(d.get("is_stream", False)),
-            is_final=bool(d.get("is_final", True))
+            is_final=bool(d.get("is_final", True)),
+            signature=d.get("signature"),
+            origin_server_id=d.get("origin_server_id")
         )

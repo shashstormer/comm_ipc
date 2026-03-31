@@ -41,12 +41,12 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
         
         try:
             await c_bad.connect()
-            ch_bad = await c_bad.open("secure", password="wrong")
+            await c_bad.open("secure", password="wrong")
             
             await provider.connect()
             ch_admin = await provider.open("secure", password="1234")
             
-            async def secret_call(cd: CommData): return "done"
+            async def secret_call(_: CommData): return "done"
             await ch_admin.add_event("shutdown", call=secret_call)
             
             await consumer.connect()
@@ -64,13 +64,13 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_listener(self):
         c1 = CommIPC(client_id="p1", socket_path=self.socket_path)
         ch1 = await c1.open("dup_chan")
-        await ch1.add_event("event1", call=lambda cd: "ok")
+        await ch1.add_event("event1", call=lambda _: "ok")
         
         c2 = CommIPC(client_id="p2", socket_path=self.socket_path)
         ch2 = await c2.open("dup_chan")
                                                                                                                             
                                                                                           
-        await ch2.add_event("event1", call=lambda cd: "fail")
+        await ch2.add_event("event1", call=lambda _: "fail")
         
         self.assertEqual(len(self.server.providers["dup_chan"]), 1)
         self.assertEqual(self.server.providers["dup_chan"]["event1"], "p1")

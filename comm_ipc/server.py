@@ -1,16 +1,21 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import os
+import secrets
+import string
 import struct
 import uuid
 import time
 from typing import Dict, Any, List, Set
 
 from comm_ipc.config import SOCKET_PATH
+from comm_ipc import security
 
 
 class CommIPCServer:
-    def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, error_policy: str = "ignore"):
+    def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, error_policy: str = "ignore", connection_secret: str = None):
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.clients: Dict[str, asyncio.StreamWriter] = {}
@@ -21,6 +26,23 @@ class CommIPCServer:
         self.error_policy = error_policy
         self._reporting_error = False
         self.auth_challenges: Dict[str, Dict[str, Any]] = {}
+        self.connection_secret_hash = security.hash_secret(connection_secret) if connection_secret else None
+        self.unauthenticated_clients: Set[asyncio.StreamWriter] = set()
+        self._cleanup_task = asyncio.create_task(self._prune_challenges())
+
+    async def _prune_challenges(self):
+        """Periodically prune expired auth challenges (DoS mitigation)."""
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            expired = [cid for cid, data in self.auth_challenges.items() if now - data["timestamp"] > 300]
+            for cid in expired:
+                del self.auth_challenges[cid]
+                if cid in self.clients:
+                    try:
+                        self.clients[cid].close()
+                    except: pass
+                    del self.clients[cid]
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self.active_writers.add(writer)
@@ -38,8 +60,48 @@ class CommIPCServer:
                     writer.close()
                     return
                 client_id = proposed_id
+                
+                if self.connection_secret_hash:
+                    challenge = security.generate_challenge()
+                    self.auth_challenges[client_id] = {
+                        "conn_challenge": challenge,
+                        "timestamp": int(time.time()),
+                        "authenticated": False
+                    }
+                    await self._send_to_writer(writer, {
+                        "type": "conn_challenge",
+                        "challenge": challenge,
+                        "server_id": self.server_id
+                    })
+                    
+                    try:
+                        len_data = await asyncio.wait_for(reader.readexactly(4), timeout=10.0)
+                        length = struct.unpack(">I", len_data)[0]
+                        data = await reader.readexactly(length)
+                        resp = json.loads(data.decode())
+                        
+                        if resp.get("type") == "conn_proof":
+                            proof = resp.get("proof")
+                            expected = security.compute_signature(self.connection_secret_hash.encode(), {"challenge": challenge})
+                            
+                            if hmac.compare_digest(expected, proof):
+                                self.auth_challenges[client_id]["authenticated"] = True
+                                await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
+                            else:
+                                await self._send_to_writer(writer, {"type": "error", "message": "Authentication failed"})
+                                await writer.drain()
+                                writer.close()
+                                return
+                        else:
+                            writer.close()
+                            return
+                    except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                        writer.close()
+                        return
+                else:
+                    await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
+
                 self.clients[client_id] = writer
-                await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
 
             while True:
                 len_data = await reader.readexactly(4)
@@ -47,6 +109,13 @@ class CommIPCServer:
                 length = struct.unpack(">I", len_data)[0]
                 data = await reader.readexactly(length)
                 msg = json.loads(data.decode())
+                
+                if self.connection_secret_hash:
+                    if not self.auth_challenges.get(client_id, {}).get("authenticated"):
+                        await self._send_to_writer(writer, {"type": "error", "message": "Not authenticated"})
+                        writer.close()
+                        return
+                
                 await self.process_message(client_id, msg)
 
         except asyncio.IncompleteReadError:
@@ -94,17 +163,15 @@ class CommIPCServer:
 
     async def _handle_register(self, client_id: str, reg: Dict):
         chan_name = reg.get("channel")
-        password = reg.get("password")
         is_provider = reg.get("is_provider", False)
         event = reg.get("event")
+        is_stream = reg.get("is_stream", False)
 
         if chan_name in self.channel_passwords:
             proof = reg.get("proof")
             challenge_id = reg.get("challenge_id")
             
             if not proof:
-                import secrets
-                import string
                 challenge = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
                 challenge_id = str(uuid.uuid4())
                 
@@ -113,7 +180,7 @@ class CommIPCServer:
                 self.auth_challenges[client_id][challenge_id] = {
                     "challenge": challenge,
                     "reg": reg,
-                    "timestamp": time.time()
+                    "timestamp": int(time.time())
                 }
                 
                 await self._send_to_client(client_id, {
@@ -124,7 +191,6 @@ class CommIPCServer:
                 })
                 return
 
-            # Verify proof
             if client_id not in self.auth_challenges or challenge_id not in self.auth_challenges[client_id]:
                 await self._report_error(Exception("Invalid or expired challenge"), client_id)
                 return
@@ -134,8 +200,6 @@ class CommIPCServer:
                 await self._report_error(Exception("Challenge expired"), client_id)
                 return
             
-            import hmac
-            import hashlib
             expected_proof = hmac.new(
                 self.channel_passwords[chan_name].encode(),
                 challenge_data["challenge"].encode(),
@@ -165,6 +229,7 @@ class CommIPCServer:
                 self.providers[chan_name] = {}
             self.providers[chan_name][event] = client_id
         else:
+            is_stream = False
             if chan_name not in self.channels:
                 self.channels[chan_name] = []
             if client_id not in self.channels[chan_name]:
@@ -174,7 +239,13 @@ class CommIPCServer:
             "type": "receive",
             "channel": "__comm_ipc_system",
             "event": "new_registration",
-            "data": reg
+            "data": {
+                "channel": chan_name,
+                "event": event,
+                "is_provider": is_provider,
+                "is_stream": is_stream,
+                "client_id": client_id
+            }
         })
 
     async def _handle_set_password(self, client_id: str, msg: Dict):
@@ -205,14 +276,18 @@ class CommIPCServer:
                 "channel": chan,
                 "event": event,
                 "sender_id": "server",
-                "server_id": self.server_id
+                "server_id": self.server_id,
+                "origin_server_id": self.server_id,
+                "timestamp": int(time.time()),
+                "target_id": None,
+                "is_stream": False,
+                "is_final": False
             }
             await self._send_to_client(client_id, resp)
             await self._report_error(Exception(err_msg), client_id)
 
     async def _handle_response(self, client_id: str, msg: Dict):
         target_id = msg.get("target_id")
-        rid = msg.get("request_id")
         if not self._prepare_message(msg, client_id): 
             return
         if target_id:
@@ -234,13 +309,16 @@ class CommIPCServer:
             await self._send_to_client(self.providers[chan][event], msg)
 
     def _prepare_message(self, msg: Dict, client_id: str) -> bool:
-        path = msg.get("path", [])
-        if self.server_id in path:
+        if self.server_id in msg.get("path", []):
             return False
+            
         msg["sender_id"] = client_id
-        msg["server_id"] = self.server_id
-        msg["timestamp"] = time.time()
-        msg["path"] = path + [self.server_id]
+        if "timestamp" not in msg:
+            msg["timestamp"] = int(time.time())
+        if "origin_server_id" not in msg:
+            msg["origin_server_id"] = self.server_id
+        
+        msg["path"] = msg.get("path", []) + [self.server_id]
         return True
 
     async def _system_broadcast(self, msg: Any):
@@ -248,12 +326,14 @@ class CommIPCServer:
             msg["sender_id"] = "system"
             msg["server_id"] = self.server_id
             for target_id in self.channels["__comm_ipc_system"]:
+                if self.connection_secret_hash and not self.auth_challenges.get(target_id, {}).get("authenticated"):
+                    continue
                 await self._send_to_client(target_id, msg)
 
-    async def _send_to_client(self, client_id: str, msg: Any):
-        writer = self.clients.get(client_id)
-        if writer:
-            await self._send_to_writer(writer, msg)
+    async def _send_to_client(self, client_id: str, msg: Dict):
+        if client_id in self.clients:
+            writer = self.clients[client_id]
+            asyncio.create_task(self._send_to_writer(writer, msg))
 
     async def _send_to_writer(self, writer: asyncio.StreamWriter, msg: Any):
         try:
@@ -278,7 +358,7 @@ class CommIPCServer:
                     "channel": "__comm_ipc_errors",
                     "event": "server_error",
                     "data": {
-                        "error": str(e),
+                        "error": str(e).split(":")[0],
                         "client_id": client_id,
                         "server_id": self.server_id
                     }
@@ -291,8 +371,9 @@ class CommIPCServer:
                     try:
                         await self._send_to_writer(self.clients[client_id], {
                             "type": "error",
-                            "message": str(e)
+                            "message": str(e).split(":")[0]
                         })
+                        await self.clients[client_id].drain()
                     except Exception:
                         pass
         finally:
@@ -324,3 +405,22 @@ class CommIPCServer:
                     except:
                         pass
                 await asyncio.wait_for(server.wait_closed(), timeout=2.0)
+            if self._cleanup_task:
+                self._cleanup_task.cancel()
+
+    async def stop(self):
+        """Stop the server and cleanup tasks."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
+        for w in list(self.active_writers):
+            try:
+                w.close()
+                await w.wait_closed()
+            except:
+                pass
+        self.active_writers.clear()

@@ -1,8 +1,11 @@
 import asyncio
 import inspect
+import time
+import uuid
 from typing import Callable, Dict, Any, List, Union, get_origin, get_args
 
 from comm_ipc.comm_data import CommData
+from comm_ipc import security
 
 
 class CommIPCChannel:
@@ -10,6 +13,7 @@ class CommIPCChannel:
         self.name = name
         self.parent = parent
         self.password = password
+        self.message_key = security.derive_key(password, name.encode()) if password else None
         self.events: Dict[str, Dict[str, Any]] = {}
         self.listeners: Dict[str, List[Callable]] = {}
         self.generic_listeners: List[Callable] = []
@@ -65,36 +69,68 @@ class CommIPCChannel:
             "is_stream": is_stream
         })
 
+    async def _create_message(self, msg_type: str, event_name: str, data: Any, request_id: str = None) -> Dict:
+        msg = {
+            "type": msg_type,
+            "channel": self.name,
+            "event": event_name,
+            "data": data,
+            "sender_id": self.parent.client_id,
+            "server_id": self.parent.server_id,
+            "origin_server_id": self.parent.server_id,
+            "timestamp": int(time.time()),
+            "request_id": request_id,
+            "target_id": None,
+            "is_stream": False,
+            "is_final": False
+        }
+        if self.message_key:
+            msg["signature"] = security.compute_signature(self.message_key, msg)
+        return msg
+
     async def event(self, event_name: str, data: Any) -> Any:
-        return await self.parent.call(self.name, event_name, data)
+        rid = str(uuid.uuid4())
+        msg = await self._create_message("call", event_name, data, rid)
+        
+        fut = asyncio.get_running_loop().create_future()
+        self.parent.pending_calls[rid] = fut
+        await self.parent.send_msg(msg)
+        return await fut
 
     async def stream(self, event_name: str, data: Any):
-        async for chunk in self.parent.stream(self.name, event_name, data):
-            yield chunk
+        rid = str(uuid.uuid4())
+        msg = await self._create_message("call", event_name, data, rid)
+            
+        self.parent.active_streams[rid] = asyncio.Queue(maxsize=1000)
+        await self.parent.send_msg(msg)
+        
+        try:
+            while True:
+                resp = await self.parent.active_streams[rid].get()
+                if resp.get("error"):
+                    raise Exception(resp["error"])
+                if resp.get("data") is not None:
+                    cd = CommData.from_dict(resp)
+                    if self.message_key:
+                        if not security.verify_signature(self.message_key, cd.to_dict(), cd.signature):
+                            raise ValueError(f"Invalid signature for channel {self.name}")
+                    yield cd
+                if resp.get("is_final"):
+                    break
+        finally:
+            if rid in self.parent.active_streams:
+                del self.parent.active_streams[rid]
 
     async def add_stream(self, name: str, call: Callable, parameters: Dict = None):
-
         await self.add_event(name, call, parameters)
 
     async def broadcast(self, event_name: str, data: Any):
-        await self.parent.send_msg({
-            "type": "broadcast",
-            "channel": self.name,
-            "event": event_name,
-            "data": data,
-            "sender_id": self.parent.client_id,
-            "server_id": self.parent.server_id
-        })
+        msg = await self._create_message("broadcast", event_name, data)
+        await self.parent.send_msg(msg)
 
     async def send(self, event_name: str, data: Any):
-        await self.parent.send_msg({
-            "type": "send",
-            "channel": self.name,
-            "event": event_name,
-            "data": data,
-            "sender_id": self.parent.client_id,
-            "server_id": self.parent.server_id
-        })
+        msg = await self._create_message("send", event_name, data)
+        await self.parent.send_msg(msg)
 
     def on_receive(self, call: Callable, event_name: str = None):
         if event_name:
@@ -105,6 +141,10 @@ class CommIPCChannel:
             self.generic_listeners.append(call)
 
     async def handle_call(self, comm_data: CommData) -> Any:
+        if self.message_key:
+            if not security.verify_signature(self.message_key, comm_data.to_dict(), comm_data.signature):
+                raise ValueError(f"Invalid signature for channel {self.name}")
+
         event_name = comm_data.event
         if event_name not in self.events:
             raise ValueError(f"Event {event_name} not found on channel {self.name}")
@@ -122,8 +162,12 @@ class CommIPCChannel:
         return result
 
     async def handle_receive(self, comm_data: CommData):
+        if self.message_key:
+            if not security.verify_signature(self.message_key, comm_data.to_dict(), comm_data.signature):
+                print(f"[SECURITY] Invalid signature on {self.name}, dropping message")
+                return
+
         event_name = comm_data.event
-        data = comm_data.data
 
         if event_name in self.listeners:
             for listener in self.listeners[event_name]:

@@ -1,13 +1,15 @@
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, List
 
 from comm_ipc.client import CommIPC
 from comm_ipc.comm_data import CommData
 
 
 class CommIPCBridge:
-    def __init__(self, bridge_id: str = None, socket_path1: str = None, socket_path2: str = None, ssl_context1=None, ssl_context2=None):
+    def __init__(self, bridge_id: str = None, socket_path1: str = None, socket_path2: str = None, 
+                 ssl_context1=None, ssl_context2=None, allowed_channels: List[str] = None):
         self.bridge_id = bridge_id or "bridge-net"
+        self.allowed_channels = allowed_channels
         self.c1 = CommIPC(client_id=f"{self.bridge_id}-c1", socket_path=socket_path1, ssl_context=ssl_context1)
         self.c2 = CommIPC(client_id=f"{self.bridge_id}-c2", socket_path=socket_path2, ssl_context=ssl_context2)
         self.registrations: Dict[str, set] = {"c1": set(), "c2": set()}
@@ -16,8 +18,18 @@ class CommIPCBridge:
 
     async def connect(self, target1_params: Dict, target2_params: Dict):
         await asyncio.gather(
-            self.c1.connect(host=target1_params.get("host"), port=target1_params.get("port"), ssl_context=target1_params.get("ssl_context")),
-            self.c2.connect(host=target2_params.get("host"), port=target2_params.get("port"), ssl_context=target2_params.get("ssl_context"))
+            self.c1.connect(
+                host=target1_params.get("host"), 
+                port=target1_params.get("port"), 
+                ssl_context=target1_params.get("ssl_context"),
+                connection_secret=target1_params.get("connection_secret")
+            ),
+            self.c2.connect(
+                host=target2_params.get("host"), 
+                port=target2_params.get("port"), 
+                ssl_context=target2_params.get("ssl_context"),
+                connection_secret=target2_params.get("connection_secret")
+            )
         )
 
         await self.c1.open("__comm_ipc_system")
@@ -44,6 +56,9 @@ class CommIPCBridge:
         src_client = getattr(self, src)
 
         channel_name = reg["channel"]
+        if self.allowed_channels is not None and channel_name not in self.allowed_channels:
+            return
+
         event_name = reg.get("event")
         is_provider = reg.get("is_provider")
         is_stream = reg.get("is_stream", False)
@@ -86,10 +101,12 @@ class CommIPCBridge:
         if dest_client.server_id in comm_data.path:
             return
 
+        if not comm_data.origin_server_id:
+            comm_data.origin_server_id = src_client.server_id
+
         comm_data.path.append(src_client.server_id)
 
         payload = comm_data.to_dict()
-
         payload["type"] = "broadcast" if comm_data.request_id is None else "call"
 
         await dest_client.send_msg(payload)

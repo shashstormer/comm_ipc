@@ -1,12 +1,14 @@
 import asyncio
-import unittest
 import os
-from typing import Union, Callable, Optional, Dict, Any
-from tests.base import start_test_server, stop_test_server
-from comm_ipc.client import CommIPC
-from comm_ipc.server import CommIPCServer
+import unittest
+from typing import Union
+
 from comm_ipc.channel import CommIPCChannel
+from comm_ipc.client import CommIPC
 from comm_ipc.comm_data import CommData
+from comm_ipc.server import CommIPCServer
+from tests.base import start_test_server, stop_test_server
+
 
 class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -62,7 +64,8 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError: pass
 
     async def test_validation_logic(self):
-        chan = CommIPCChannel("test", None)
+        t_client = CommIPC()
+        chan = CommIPCChannel("test", t_client)
         schema = {"age": int, "opt": Union[int, None]}
         with self.assertRaises(TypeError): chan.validate_data("not-dict", schema)
         with self.assertRaises(ValueError): chan.validate_data({}, schema)
@@ -73,7 +76,7 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         srv = CommIPCServer(error_policy="raise")
         with self.assertRaises(Exception): await srv._report_error(Exception("fail"))
         err_event = asyncio.Event()
-        async def on_err(e): err_event.set()
+        async def on_err(_): err_event.set()
         client = CommIPC(on_error=on_err, socket_path=self.socket_path)
         await client.connect()
         if client.writer: client.writer.close()
@@ -86,7 +89,7 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         await c1.connect()
         chan1 = await c1.open("gen")
         received = asyncio.Event()
-        async def gen_handler(cd: CommData): received.set()
+        async def gen_handler(_: CommData): received.set()
         chan1.on_receive(gen_handler)
         c2 = CommIPC(socket_path=self.socket_path)
         await c2.connect()
@@ -94,7 +97,7 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         await chan2.broadcast("any", {"x": 1})
         await asyncio.wait_for(received.wait(), timeout=1.0)
         received_sync = asyncio.Event()
-        def sync_handler(cd: CommData): received_sync.set()
+        def sync_handler(_: CommData): received_sync.set()
         chan1.on_receive(sync_handler)
         await chan2.broadcast("other", {"y": 2})
         await asyncio.wait_for(received_sync.wait(), timeout=1.0)
@@ -107,7 +110,7 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         p = CommIPC(client_id="p1", socket_path=self.socket_path)
         ch_p = await p.open("ch1")
         received = asyncio.Event()
-        async def on_msg(cd: CommData):
+        async def on_msg(_: CommData):
             received.set()
         await ch_p.add_event("e1", call=on_msg)
         await asyncio.sleep(0.5)
@@ -126,7 +129,7 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         await client.connect()
         error_received = asyncio.Event()
         err_ch = await client.open("__comm_ipc_errors")
-        def on_err(cd: CommData):
+        def on_err(_):
             error_received.set()
         err_ch.on_receive(on_err)
         await asyncio.sleep(0.2)
