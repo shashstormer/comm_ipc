@@ -17,7 +17,7 @@ from comm_ipc import security
 class CommIPCServer:
     def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, 
                  error_policy: str = "ignore", connection_secret: str = None,
-                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate"):
+                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate", verbose: bool = False):
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.clients: Dict[str, asyncio.StreamWriter] = {}
@@ -26,6 +26,7 @@ class CommIPCServer:
         self.channel_passwords: Dict[str, str] = system_passwords or {}
         self.channel_members: Dict[str, List[str]] = {}
         self.channel_policy = channel_policy
+        self.verbose = verbose
         self.providers: Dict[str, Dict[str, str]] = {}
         self.error_policy = error_policy
         self._reporting_error = False
@@ -33,6 +34,18 @@ class CommIPCServer:
         self.connection_secret_hash = security.hash_secret(connection_secret) if connection_secret else None
         self.unauthenticated_clients: Set[asyncio.StreamWriter] = set()
         self._cleanup_task = None
+        
+    def _log(self, message: str, level: str = "info", client_id: str = None):
+        log_msg = f"[SERVER {self.server_id}] {message}"
+        if self.verbose:
+            print(log_msg)
+            
+        asyncio.create_task(self._system_broadcast("__comm_ipc_logs", {
+            "type": "receive",
+            "channel": "__comm_ipc_logs",
+            "event": "server_log",
+            "data": {"message": message, "level": level, "client_id": client_id, "server_id": self.server_id}
+        }))
 
     async def _prune_challenges(self):
         while True:
@@ -104,6 +117,7 @@ class CommIPCServer:
                 else:
                     await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
 
+                    self._log(f"Client {client_id} identified", client_id=client_id)
                 self.clients[client_id] = writer
 
             while True:
@@ -296,7 +310,7 @@ class CommIPCServer:
             if client_id not in self.channels[chan_name]:
                 self.channels[chan_name].append(client_id)
 
-        await self._system_broadcast({
+        await self._system_broadcast("__comm_ipc_system", {
             "type": "receive",
             "channel": "__comm_ipc_system",
             "event": "new_registration",
@@ -341,6 +355,7 @@ class CommIPCServer:
 
         old_pwd = self.channel_passwords.get(chan)
         if pwd != old_pwd:
+            self._log(f"Channel {chan} password set/changed", client_id=client_id)
             self.channel_passwords[chan] = pwd
             others = [cid for cid in self.channel_members.get(chan, []) if cid != client_id]
             for cid in others:
@@ -425,11 +440,11 @@ class CommIPCServer:
         msg["path"] = msg.get("path", []) + [self.server_id]
         return True
 
-    async def _system_broadcast(self, msg: Any):
-        if "__comm_ipc_system" in self.channels:
+    async def _system_broadcast(self, channel_name: str, msg: Any):
+        if channel_name in self.channels:
             msg["sender_id"] = "system"
             msg["server_id"] = self.server_id
-            for target_id in self.channels["__comm_ipc_system"]:
+            for target_id in self.channels[channel_name]:
                 if self.connection_secret_hash and not self.auth_challenges.get(target_id, {}).get("authenticated"):
                     continue
                 await self._send_to_client(target_id, msg)
@@ -467,9 +482,8 @@ class CommIPCServer:
                         "server_id": self.server_id
                     }
                 }
-                if "__comm_ipc_errors" in self.channels:
-                    for tid in self.channels["__comm_ipc_errors"]:
-                        await self._send_to_client(tid, err_msg)
+                self._log(str(e).split(":")[0], level="error", client_id=client_id)
+                await self._system_broadcast("__comm_ipc_errors", err_msg)
                 
                 if client_id and client_id in self.clients:
                     try:

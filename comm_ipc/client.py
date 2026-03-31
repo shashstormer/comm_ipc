@@ -15,7 +15,7 @@ from comm_ipc import security
 
 class CommIPC:
     def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, 
-                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0):
+                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0, verbose: bool = False):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.on_error = on_error
@@ -23,6 +23,7 @@ class CommIPC:
         self.connection_secret = connection_secret
         self.auto_reconnect = auto_reconnect
         self.reconnect_max_tries = reconnect_max_tries
+        self.verbose = verbose
         self._reconnect_count = 0
         self.server_id: Optional[str] = None
         self.channels: Dict[str, 'CommIPCChannel'] = {}
@@ -35,6 +36,10 @@ class CommIPC:
         self.on_msg: Optional[Callable[[Dict], Any]] = None
         self._host = None
         self._port = None
+    
+    def _log(self, message: str):
+        if self.verbose:
+            print(f"[CLIENT {self.client_id}] {message}")
 
     async def connect(self, host: str = None, port: int = None, ssl_context=None, connection_secret: str = None):
         if connection_secret:
@@ -52,7 +57,7 @@ class CommIPC:
         else:
             self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
 
-        print(f"[CLIENT {self.client_id}] Connecting to server...")
+        self._log("Connecting to server...")
         await self.send_msg({"type": "identify", "client_id": self.client_id})
 
         try:
@@ -82,7 +87,7 @@ class CommIPC:
         if resp.get("type") == "identified":
             self.client_id = resp.get("client_id")
             self.server_id = resp.get("server_id")
-            print(f"[CLIENT {self.client_id}] Identified by server {self.server_id}")
+            self._log(f"Identified by server {self.server_id}")
         elif resp.get("type") == "error":
             raise Exception(f"Connection failed: {resp.get('message')}")
 
@@ -127,23 +132,23 @@ class CommIPC:
         delay = 1
         while self.auto_reconnect:
             if self.reconnect_max_tries > 0 and self._reconnect_count >= self.reconnect_max_tries:
-                print(f"[CLIENT {self.client_id}] Max reconnection attempts reached.")
+                self._log("Max reconnection attempts reached.")
                 break
             
             try:
                 self._reconnect_count += 1
-                print(f"[CLIENT {self.client_id}] Reconnecting (attempt {self._reconnect_count})...")
+                self._log(f"Reconnecting (attempt {self._reconnect_count})...")
                 await asyncio.sleep(delay)
                 await self.connect()
                 await self._restore_state()
                 self._reconnect_count = 0
-                print(f"[CLIENT {self.client_id}] Reconnection successful.")
+                self._log("Reconnection successful.")
                 break
             except Exception as e:
                 if "Authentication failed" in str(e) or "Invalid channel password" in str(e):
-                    print(f"[CLIENT {self.client_id}] Critical auth failure, stopping reconnection.")
+                    self._log("Critical auth failure, stopping reconnection.")
                     break
-                print(f"[CLIENT {self.client_id}] Reconnection failed: {e}. Retrying in {delay}s...")
+                self._log(f"Reconnection failed: {e}. Retrying in {delay}s...")
                 delay = min(delay * 2, 60)
 
     async def _restore_state(self):
@@ -338,7 +343,7 @@ class CommIPC:
         try:
             resp = await asyncio.wait_for(fut, timeout=10.0)
             if password and not resp.data.get("authenticated"):
-                 print(f"[CLIENT {self.client_id}] Rejecting unprotected channel {chan}")
+                 self._log(f"Rejecting unprotected channel {chan}")
                  if chan in self.channels: del self.channels[chan]
                  raise Exception(f"Channel {chan} is unprotected, but a password was provided.")
         except asyncio.TimeoutError:

@@ -133,7 +133,6 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
             error_received.set()
         err_ch.on_receive(on_err)
         await asyncio.sleep(0.2)
-        print("[DEBUG] triggering server error")
         await srv._report_error(Exception("test-err"))
         await asyncio.wait_for(error_received.wait(), timeout=2.0)
         

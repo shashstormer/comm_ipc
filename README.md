@@ -154,11 +154,26 @@ await client.set_password("secure-data", "strong-password")
 channel = await client.open("secure-data", password="strong-password")
 ```
 
+#### Protecting System Channels
+
+You can secure internal system channels (logs, errors, registration events) by providing a `system_passwords` dictionary when initializing the server:
+
+```python
+server = CommIPCServer(
+    system_passwords={
+        "__comm_ipc_logs": "log-secret",
+        "__comm_ipc_errors": "error-secret",
+        "__comm_ipc_system": "sys-secret"
+    }
+)
+```
+
 ## Performance and Resilience
 
 CommIPC is optimized for reliability:
 - **Auto-Reconnect**: Automatically recovers from server restarts and network interruptions.
 - **State Preservation**: Transparently restores all active channel memberships and event providers after a reconnection event.
+- **Optional Client Logging**: Clients are silent by default; set `verbose=True` during initialization to enable terminal logging.
 - **Unix Domain Sockets**: Minimizes latency for local-host communication by bypassing the network stack.
 
 ## Testing

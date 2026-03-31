@@ -186,7 +186,8 @@ class CommIPCChannel:
     async def handle_receive(self, comm_data: CommData):
         if self.message_key:
             if not security.verify_signature(self.message_key, comm_data.to_dict(), comm_data.signature):
-                print(f"[SECURITY] Invalid signature on {self.name}, dropping message")
+                if self.parent.verbose:
+                    print(f"[SECURITY] Invalid signature on {self.name}, dropping message")
                 return
 
         event_name = comm_data.event
