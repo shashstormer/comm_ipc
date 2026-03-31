@@ -11,10 +11,11 @@ from comm_ipc.comm_data import CommData
 
 
 class CommIPC:
-    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None):
+    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, ssl_context=None):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.on_error = on_error
+        self.ssl_context = ssl_context
         self.server_id: Optional[str] = None
         self.channels: Dict[str, CommIPCChannel] = {}
         self.active_streams: Dict[str, asyncio.Queue] = {}
@@ -25,12 +26,13 @@ class CommIPC:
         self._ready = asyncio.Event()
         self.on_msg: Optional[Callable[[Dict], Any]] = None
 
-    async def connect(self, host: str = None, port: int = None):
+    async def connect(self, host: str = None, port: int = None, ssl_context=None):
         if self.writer:
             return
 
+        ctx = ssl_context or self.ssl_context
         if host and port:
-            self.reader, self.writer = await asyncio.open_connection(host, port)
+            self.reader, self.writer = await asyncio.open_connection(host, port, ssl=ctx)
         else:
             self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
 
@@ -175,6 +177,30 @@ class CommIPC:
                 cd = CommData.from_dict(msg)
                 await chan.handle_receive(cd)
 
+        elif mtype == "auth_challenge":
+            import hmac
+            import hashlib
+            chan_name = msg.get("channel")
+            challenge = msg.get("challenge")
+            challenge_id = msg.get("challenge_id")
+            
+            if chan_name in self.channels:
+                chan = self.channels[chan_name]
+                if chan.password:
+                    proof = hmac.new(
+                        chan.password.encode(),
+                        challenge.encode(),
+                        hashlib.sha256
+                    ).hexdigest()
+                    
+                    await self.send_msg({
+                        "type": "register",
+                        "client_id": self.client_id,
+                        "channel": chan_name,
+                        "proof": proof,
+                        "challenge_id": challenge_id
+                    })
+
         elif mtype == "error":
             mtext = msg.get('message', 'Unknown server error')
             if self.on_error:
@@ -213,7 +239,6 @@ class CommIPC:
             "type": "register",
             "client_id": self.client_id,
             "channel": chan,
-            "password": password,
             "is_provider": False
         })
         return self.channels[chan]

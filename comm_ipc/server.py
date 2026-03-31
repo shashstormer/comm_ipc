@@ -20,6 +20,7 @@ class CommIPCServer:
         self.providers: Dict[str, Dict[str, str]] = {}
         self.error_policy = error_policy
         self._reporting_error = False
+        self.auth_challenges: Dict[str, Dict[str, Any]] = {}
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self.active_writers.add(writer)
@@ -98,9 +99,57 @@ class CommIPCServer:
         event = reg.get("event")
 
         if chan_name in self.channel_passwords:
-            if self.channel_passwords[chan_name] != password:
+            proof = reg.get("proof")
+            challenge_id = reg.get("challenge_id")
+            
+            if not proof:
+                import secrets
+                import string
+                challenge = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
+                challenge_id = str(uuid.uuid4())
+                
+                if client_id not in self.auth_challenges:
+                    self.auth_challenges[client_id] = {}
+                self.auth_challenges[client_id][challenge_id] = {
+                    "challenge": challenge,
+                    "reg": reg,
+                    "timestamp": time.time()
+                }
+                
+                await self._send_to_client(client_id, {
+                    "type": "auth_challenge",
+                    "channel": chan_name,
+                    "challenge": challenge,
+                    "challenge_id": challenge_id
+                })
+                return
+
+            # Verify proof
+            if client_id not in self.auth_challenges or challenge_id not in self.auth_challenges[client_id]:
+                await self._report_error(Exception("Invalid or expired challenge"), client_id)
+                return
+            
+            challenge_data = self.auth_challenges[client_id].pop(challenge_id)
+            if time.time() - challenge_data["timestamp"] > 60:
+                await self._report_error(Exception("Challenge expired"), client_id)
+                return
+            
+            import hmac
+            import hashlib
+            expected_proof = hmac.new(
+                self.channel_passwords[chan_name].encode(),
+                challenge_data["challenge"].encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if not hmac.compare_digest(expected_proof, proof):
                 await self._report_error(Exception("Invalid channel password"), client_id)
                 return
+            
+            reg = challenge_data["reg"]
+            chan_name = reg.get("channel")
+            is_provider = reg.get("is_provider", False)
+            event = reg.get("event")
 
         if is_provider:
             if not event: return

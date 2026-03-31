@@ -60,7 +60,6 @@ class CommIPCChannel:
             "type": "register",
             "client_id": self.parent.client_id,
             "channel": self.name,
-            "password": self.password,
             "is_provider": True,
             "event": name,
             "is_stream": is_stream

@@ -6,18 +6,18 @@ from comm_ipc.comm_data import CommData
 
 
 class CommIPCBridge:
-    def __init__(self, bridge_id: str = None, socket_path1: str = None, socket_path2: str = None):
+    def __init__(self, bridge_id: str = None, socket_path1: str = None, socket_path2: str = None, ssl_context1=None, ssl_context2=None):
         self.bridge_id = bridge_id or "bridge-net"
-        self.c1 = CommIPC(client_id=f"{self.bridge_id}-c1", socket_path=socket_path1)
-        self.c2 = CommIPC(client_id=f"{self.bridge_id}-c2", socket_path=socket_path2)
+        self.c1 = CommIPC(client_id=f"{self.bridge_id}-c1", socket_path=socket_path1, ssl_context=ssl_context1)
+        self.c2 = CommIPC(client_id=f"{self.bridge_id}-c2", socket_path=socket_path2, ssl_context=ssl_context2)
         self.registrations: Dict[str, set] = {"c1": set(), "c2": set()}
         self.synced_channels: Dict[str, set] = {"c1": set(), "c2": set()}
         self.running = False
 
     async def connect(self, target1_params: Dict, target2_params: Dict):
         await asyncio.gather(
-            self.c1.connect(host=target1_params.get("host"), port=target1_params.get("port")),
-            self.c2.connect(host=target2_params.get("host"), port=target2_params.get("port"))
+            self.c1.connect(host=target1_params.get("host"), port=target1_params.get("port"), ssl_context=target1_params.get("ssl_context")),
+            self.c2.connect(host=target2_params.get("host"), port=target2_params.get("port"), ssl_context=target2_params.get("ssl_context"))
         )
 
         await self.c1.open("__comm_ipc_system")
