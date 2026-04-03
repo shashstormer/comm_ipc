@@ -20,10 +20,12 @@ async def start_server(passwords=None, policy="terminate"):
         if os.path.exists(SOCKET_A): break
         await asyncio.sleep(0.1)
         
-    return server, task
+    return server, task, srv
 
-async def stop_server(server, task):
-    server.running = False
+async def stop_server(server, task, srv):
+    await server.close()
+    srv.close()
+    await srv.wait_closed()
     task.cancel()
     try: await task
     except asyncio.CancelledError: pass
@@ -36,10 +38,10 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         if self.server:
-            await stop_server(self.server, self.server_task)
+            await stop_server(self.server, self.server_task, self.srv)
 
     async def test_ownership_and_admin(self):
-        self.server, self.server_task = await start_server()
+        self.server, self.server_task, self.srv = await start_server()
         
         c1 = CommIPC(client_id="owner", socket_path=SOCKET_A)
         c2 = CommIPC(client_id="other", socket_path=SOCKET_A)
@@ -58,7 +60,7 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         await c2.close()
 
     async def test_policy_terminate(self):
-        self.server, self.server_task = await start_server(policy="terminate")
+        self.server, self.server_task, self.srv = await start_server(policy="terminate")
         
         c1 = CommIPC(client_id="owner", socket_path=SOCKET_A)
         c2 = CommIPC(client_id="consumer", socket_path=SOCKET_A)
@@ -78,7 +80,7 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         await c2.close()
 
     async def test_policy_promote(self):
-        self.server, self.server_task = await start_server(policy="promote")
+        self.server, self.server_task, self.srv = await start_server(policy="promote")
         
         c1 = CommIPC(client_id="owner", socket_path=SOCKET_A)
         c2 = CommIPC(client_id="second", socket_path=SOCKET_A)
@@ -96,7 +98,7 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         await c2.close()
 
     async def test_auto_reconnect(self):
-        self.server, self.server_task = await start_server()
+        self.server, self.server_task, self.srv = await start_server()
         
         c1 = CommIPC(client_id="reconnector", socket_path=SOCKET_A, auto_reconnect=True)
         ch = await c1.open("sticky-chan")
@@ -104,11 +106,11 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         received = []
         ch.on_receive(lambda data: received.append(data.data), "ping")
         
-        await stop_server(self.server, self.server_task)
+        await stop_server(self.server, self.server_task, self.srv)
         self.server = None
         await asyncio.sleep(0.5)
         
-        self.server, self.server_task = await start_server()
+        self.server, self.server_task, self.srv = await start_server()
         await asyncio.sleep(1.5)
         
         c2 = CommIPC(client_id="sender", socket_path=SOCKET_A)
@@ -122,7 +124,7 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         await c2.close()
 
     async def test_insecure_channel_rejection(self):
-        self.server, self.server_task = await start_server()
+        self.server, self.server_task, self.srv = await start_server()
         
         c1 = CommIPC(client_id="secure-client", socket_path=SOCKET_A)
         
@@ -133,7 +135,7 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         await c1.close()
 
     async def test_system_channel_protection(self):
-        self.server, self.server_task = await start_server(passwords={"__comm_ipc_system": "sys-pass"})
+        self.server, self.server_task, self.srv = await start_server(passwords={"__comm_ipc_system": "sys-pass"})
         
         c1 = CommIPC(client_id="unauth", socket_path=SOCKET_A)
         

@@ -17,10 +17,12 @@ async def stop_test_server(arg1, arg2=None):
         server = arg1
         task = arg2
 
-    if server and hasattr(server, 'stop'):
-        await server.stop()
+    if server:
+        if hasattr(server, 'close'):
+             await server.close()
+        elif hasattr(server, 'stop'):
+             await server.stop()
+             
     task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    try: await task
+    except asyncio.CancelledError: pass

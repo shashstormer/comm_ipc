@@ -38,6 +38,7 @@ class CommIPCServer:
         self.idle_timeout = idle_timeout
         self.data_timeout = data_timeout
         self._cleanup_task = None
+        self._writer_locks: Dict[asyncio.StreamWriter, asyncio.Lock] = {}
         
     def _log(self, message: str, level: str = "info", client_id: str = None):
         log_msg = f"[SERVER {self.server_id}] {message}"
@@ -119,7 +120,8 @@ class CommIPCServer:
                         writer.close()
                         return
                 else:
-                    await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
+                    if not self._reporting_error:
+                        await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
 
                     self._log(f"Client {client_id} identified", client_id=client_id)
                 self.clients[client_id] = writer
@@ -189,6 +191,10 @@ class CommIPCServer:
 
             if writer in self.active_writers:
                 self.active_writers.remove(writer)
+            
+            if writer in self._writer_locks:
+                del self._writer_locks[writer]
+
             try:
                 writer.close()
                 await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
@@ -412,6 +418,17 @@ class CommIPCServer:
             await self._send_to_client(client_id, resp)
             await self._report_error(Exception(err_msg), client_id)
 
+    async def close(self):
+        self.running = False
+        for writer in list(self.active_writers):
+            try:
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except:
+                pass
+        self.active_writers.clear()
+        self._writer_locks.clear()
+
     async def _handle_response(self, client_id: str, msg: Dict):
         target_id = msg.get("target_id")
         if not self._prepare_message(msg, client_id): 
@@ -463,14 +480,19 @@ class CommIPCServer:
             asyncio.create_task(self._send_to_writer(writer, msg))
 
     async def _send_to_writer(self, writer: asyncio.StreamWriter, msg: Any):
-        try:
-            data = json.dumps(msg).encode()
-            length = struct.pack(">I", len(data))
-            writer.write(length + data)
-            await writer.drain()
-        except Exception as e:
-            if not self._reporting_error:
-                await self._report_error(e)
+        if writer not in self._writer_locks:
+            self._writer_locks[writer] = asyncio.Lock()
+        
+        lock = self._writer_locks[writer]
+        async with lock:
+            try:
+                data = json.dumps(msg).encode()
+                length = struct.pack(">I", len(data))
+                writer.write(length + data)
+                await writer.drain()
+            except Exception as e:
+                if not self._reporting_error:
+                    await self._report_error(e)
 
     async def _report_error(self, e: Exception, client_id: str = None):
         if self._reporting_error:
@@ -528,6 +550,7 @@ class CommIPCServer:
                 for w in list(self.active_writers):
                     try:
                         w.close()
+                        await asyncio.wait_for(w.wait_closed(), timeout=1.0)
                     except:
                         pass
                 await asyncio.wait_for(server.wait_closed(), timeout=2.0)

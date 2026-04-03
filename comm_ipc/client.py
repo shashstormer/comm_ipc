@@ -44,12 +44,18 @@ class CommIPC:
         self.on_msg: Optional[Callable[[Dict], Any]] = None
         self._host = None
         self._port = None
+        self._send_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
     
     def _log(self, message: str):
         if self.verbose:
             print(f"[CLIENT {self.client_id}] {message}")
 
     async def connect(self, host: str = None, port: int = None, ssl_context=None, connection_secret: str = None):
+        async with self._connect_lock:
+            await self._connect_unlocked(host, port, ssl_context, connection_secret)
+
+    async def _connect_unlocked(self, host: str = None, port: int = None, ssl_context=None, connection_secret: str = None):
         if connection_secret:
             self.connection_secret = connection_secret
             
@@ -66,38 +72,48 @@ class CommIPC:
             self.reader, self.writer = await asyncio.open_unix_connection(self.socket_path)
 
         self._log("Connecting to server...")
-        await self.send_msg({"type": "identify", "client_id": self.client_id})
-
         try:
-            len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
-            length = struct.unpack(">I", len_data)[0]
-            data = await asyncio.wait_for(self.reader.readexactly(length), timeout=self.data_timeout)
-            resp = json.loads(data.decode())
-        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
-            if self.writer: 
-                self.writer.close()
+            await self._send_msg_unlocked({"type": "identify", "client_id": self.client_id})
+
+            try:
+                len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
+                length = struct.unpack(">I", len_data)[0]
+                data = await asyncio.wait_for(self.reader.readexactly(length), timeout=self.data_timeout)
+                resp = json.loads(data.decode())
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                raise ConnectionError("Timeout or connection lost during identification")
+
+            if resp.get("type") == "conn_challenge":
+                if not self.connection_secret:
+                    raise Exception("Server required connection secret but none provided")
+                challenge = resp.get("challenge")
+                secret_hash = security.hash_secret(self.connection_secret)
+                proof = security.compute_signature(secret_hash.encode(), {"challenge": challenge})
+                async with self._send_lock:
+                    await self._send_to_socket_unlocked({"type": "conn_proof", "proof": proof})
+                
+                len_data = await self.reader.readexactly(4)
+                length = struct.unpack(">I", len_data)[0]
+                data = await self.reader.readexactly(length)
+                resp = json.loads(data.decode())
+
+            if resp.get("type") == "identified":
+                self.client_id = resp.get("client_id")
+                self.server_id = resp.get("server_id")
+                self._log(f"Identified by server {self.server_id}")
+            elif resp.get("type") == "error":
+                raise Exception(f"Connection failed: {resp.get('message')}")
+        except Exception:
+            if self.writer:
+                try:
+                    self.writer.close()
+                    # Await closure to prevent ResourceWarning
+                    await asyncio.wait_for(self.writer.wait_closed(), timeout=1.0)
+                except:
+                    pass
                 self.writer = None
-            raise ConnectionError("Timeout or connection lost during identification")
-
-        if resp.get("type") == "conn_challenge":
-            if not self.connection_secret:
-                raise Exception("Server required connection secret but none provided")
-            challenge = resp.get("challenge")
-            secret_hash = security.hash_secret(self.connection_secret)
-            proof = security.compute_signature(secret_hash.encode(), {"challenge": challenge})
-            await self.send_msg({"type": "conn_proof", "proof": proof})
-            
-            len_data = await self.reader.readexactly(4)
-            length = struct.unpack(">I", len_data)[0]
-            data = await self.reader.readexactly(length)
-            resp = json.loads(data.decode())
-
-        if resp.get("type") == "identified":
-            self.client_id = resp.get("client_id")
-            self.server_id = resp.get("server_id")
-            self._log(f"Identified by server {self.server_id}")
-        elif resp.get("type") == "error":
-            raise Exception(f"Connection failed: {resp.get('message')}")
+            self.reader = None
+            raise
 
         self._loop_task = asyncio.create_task(self._listen_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat())
@@ -149,18 +165,15 @@ class CommIPC:
             
             try:
                 self._reconnect_count += 1
-                self._log(f"Reconnecting (attempt {self._reconnect_count})...")
                 await asyncio.sleep(delay)
                 await self.connect()
                 await self._restore_state()
                 self._reconnect_count = 0
-                self._log("Reconnection successful.")
                 break
             except Exception as e:
                 if "Authentication failed" in str(e) or "Invalid channel password" in str(e):
                     self._log("Critical auth failure, stopping reconnection.")
                     break
-                self._log(f"Reconnection failed: {e}. Retrying in {delay}s...")
                 delay = min(delay * 2, 60)
 
     async def _heartbeat(self):
@@ -319,6 +332,12 @@ class CommIPC:
 
         elif mtype == "error":
             mtext = msg.get('message', 'Unknown server error')
+            rid = msg.get('request_id')
+            if rid and rid in self.pending_calls:
+                fut = self.pending_calls.pop(rid)
+                if not fut.done():
+                    fut.set_exception(Exception(mtext))
+            
             if self.on_error:
                 err = Exception(mtext)
                 if asyncio.iscoroutinefunction(self.on_error):
@@ -327,8 +346,17 @@ class CommIPC:
                     self.on_error(err)
 
     async def send_msg(self, msg: Dict):
+        async with self._send_lock:
+            if not self.writer:
+                pass
+        
         if not self.writer:
             await self.connect()
+            
+        async with self._send_lock:
+            await self._send_to_socket_unlocked(msg)
+
+    async def _send_to_socket_unlocked(self, msg: Dict):
         try:
             data = json.dumps(msg).encode()
             length = struct.pack(">I", len(data))
@@ -340,6 +368,11 @@ class CommIPC:
                     await self.on_error(e)
                 else:
                     self.on_error(e)
+
+    async def _send_msg_unlocked(self, msg: Dict):
+        """DEPRECATED: Use _send_to_socket_unlocked instead with explicit locking."""
+        async with self._send_lock:
+            await self._send_to_socket_unlocked(msg)
 
     async def open(self, chan: str, password: str = None) -> CommIPCChannel:
         if not self._ready.is_set():

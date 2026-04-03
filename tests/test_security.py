@@ -29,7 +29,10 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
         
         c2 = CommIPC(client_id="same-id", socket_path=self.socket_path)
         with self.assertRaises(Exception) as cm:
-            await c2.connect()
+            try:
+                await c2.connect()
+            finally:
+                await c2.close()
         self.assertIn("already in use", str(cm.exception))
         
         await c1.close()

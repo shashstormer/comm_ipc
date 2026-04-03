@@ -79,7 +79,10 @@ class TestCoverageEdge(unittest.IsolatedAsyncioTestCase):
         
         c2 = CommIPC(client_id="fixed-id", socket_path=self.socket_path)
         with self.assertRaises(Exception):
-            await c2.connect()
+            try:
+                await c2.connect()
+            finally:
+                await c2.close()
             
         ch1 = await c1.open("chan1")
         await ch1.add_event("ev1", call=lambda cd: "ok")

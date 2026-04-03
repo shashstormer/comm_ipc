@@ -30,8 +30,11 @@ class TestZeroTrust(unittest.IsolatedAsyncioTestCase):
     async def test_handshake_failure(self):
         client = CommIPC(socket_path=self.socket_path, connection_secret="wrong-secret")
         with self.assertRaises(Exception) as cm:
-            await client.connect()
-        self.assertIn("Authentication failed", str(cm.exception))
+            try:
+                await client.connect()
+            finally:
+                await client.close()
+        self.assertIn("Connection failed: Authentication failed", str(cm.exception))
 
     async def test_e2e_integrity(self):
         c1 = CommIPC(client_id="sender", socket_path=self.socket_path, connection_secret=self.secret)
