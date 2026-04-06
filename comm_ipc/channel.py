@@ -42,19 +42,19 @@ class CommIPCChannel:
 
         if isinstance(schema, type) and issubclass(schema, BaseModel):
             return schema.model_validate(data).model_dump()
-        
-        # Dict support removed. Only BaseModel is allowed for schemas.
+
         if isinstance(schema, dict):
             raise TypeError("Dictionary-based schemas are no longer supported. Please use a Pydantic BaseModel class.")
 
         return data
 
-    async def add_event(self, name: str, call: Callable, parameters: Optional[Type[BaseModel]] = None, returns: Optional[Type[BaseModel]] = None):
+    async def add_event(self, name: str, call: Callable, parameters: Optional[Type[BaseModel]] = None,
+                        returns: Optional[Type[BaseModel]] = None):
         is_stream = inspect.isasyncgenfunction(call)
-        
+
         param_schema = parameters.model_json_schema() if parameters else None
         return_schema = returns.model_json_schema() if returns else None
-        
+
         self.events[name] = {
             "call": call,
             "parameters": parameters,
@@ -63,7 +63,7 @@ class CommIPCChannel:
             "param_schema": param_schema,
             "return_schema": return_schema
         }
-        
+
         if name not in self.listeners:
             self.listeners[name] = []
         if call not in self.listeners[name]:
@@ -111,7 +111,7 @@ class CommIPCChannel:
     async def event(self, event_name: str, data: Any) -> Any:
         rid = str(uuid.uuid4())
         msg = await self._create_message("call", event_name, data, rid)
-        
+
         fut = asyncio.get_running_loop().create_future()
         self.parent.pending_calls[rid] = fut
         await self.parent.send_msg(msg)
@@ -120,10 +120,10 @@ class CommIPCChannel:
     async def stream(self, event_name: str, data: Any):
         rid = str(uuid.uuid4())
         msg = await self._create_message("call", event_name, data, rid)
-            
+
         self.parent.active_streams[rid] = asyncio.Queue(maxsize=1000)
         await self.parent.send_msg(msg)
-        
+
         try:
             while True:
                 resp = await self.parent.active_streams[rid].get()
@@ -199,14 +199,17 @@ class CommIPCChannel:
 
         handler = handler_info["call"]
         result = await handler(comm_data)
-        def explore(self) -> Dict[str, Any]:
+        validated_result = self.validate_data(result, handler_info["returns"])
+        return validated_result
+
+    def explore(self) -> Dict[str, Any]:
         """Provides a consolidated view of all discovered events and subscriptions in this channel."""
         # Mix local events (provided by this client) and remote events (discovered from server)
         all_info = {
             "events": {},
             "subscriptions": {}
         }
-        
+
         # Local events
         for name, info in self.events.items():
             all_info["events"][name] = {
@@ -215,14 +218,14 @@ class CommIPCChannel:
                 "parameters": info["param_schema"],
                 "returns": info["return_schema"]
             }
-            
+
         # Local subscriptions
         for name, info in self.subscriptions.items():
             all_info["subscriptions"][name] = {
                 "owner": self.parent.client_id,
                 "parameters": info["param_schema"]
             }
-            
+
         # Remote info from server
         for name, info in self.remote_schemas.items():
             stype = info.get("type", "event")
@@ -235,12 +238,12 @@ class CommIPCChannel:
                         "returns": info.get("return_schema")
                     }
             elif stype == "subscription":
-                 if name not in all_info["subscriptions"]:
+                if name not in all_info["subscriptions"]:
                     all_info["subscriptions"][name] = {
                         "owner": info.get("owner"),
                         "parameters": info.get("param_schema")
                     }
-                    
+
         return all_info
 
     def get_schema(self, name: str) -> Optional[Dict[str, Any]]:
