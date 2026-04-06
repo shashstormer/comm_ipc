@@ -2,6 +2,7 @@ import asyncio
 import os
 import unittest
 from typing import Union, Optional
+from pydantic import BaseModel
 
 from comm_ipc.bridge import CommIPCBridge
 from comm_ipc.client import CommIPC
@@ -23,13 +24,17 @@ class TestCoverageEdge(unittest.IsolatedAsyncioTestCase):
     async def test_validation_edge_cases(self):
         client = CommIPC(socket_path=self.socket_path)
         ch = await client.open("edge")
-        
+
+        class EdgeParams(BaseModel):
+            a: Union[int, str]
+            b: Optional[int] = None
+
         async def handler(cd: CommData):
             a = cd.data.get("a")
             b = cd.data.get("b")
             return f"{a}-{b}"
             
-        await ch.add_event("test", call=handler, parameters={"a": Union[int, str], "b": Optional[int]})
+        await ch.add_event("test", call=handler, parameters=EdgeParams)
         
         res1 = await ch.event("test", {"a": 1, "b": 2})
         self.assertEqual(res1.data, "1-2")

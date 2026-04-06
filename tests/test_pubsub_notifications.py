@@ -28,14 +28,11 @@ class TestPubSubNotifications(unittest.IsolatedAsyncioTestCase):
         async def on_last(_):
             last_notified.set()
 
-        # The provider listens for system events on its own channel
         p_ch.on_receive(on_first, event_name="subscription.updates.first")
         p_ch.on_receive(on_last, event_name="subscription.updates.last")
 
-        # Add the subscription
         await p_ch.add_subscription("updates")
 
-        # 1. First subscriber joins
         sub1 = CommIPC(client_id="sub1", socket_path=self.socket_path)
 
         async def sub1_cb(_):
@@ -47,7 +44,6 @@ class TestPubSubNotifications(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(first_notified.wait(), timeout=2.0)
         self.assertTrue(first_notified.is_set())
 
-        # 2. Second subscriber joins (should NOT trigger another 'first')
         sub2 = CommIPC(client_id="sub2", socket_path=self.socket_path)
 
         async def sub2_cb(_):
@@ -56,12 +52,10 @@ class TestPubSubNotifications(unittest.IsolatedAsyncioTestCase):
         await sub2.connect()
         await sub2.subscribe("notif_chan", "updates", sub2_cb)
 
-        # 3. First subscriber leaves (should NOT trigger 'last' yet)
         await sub1.unsubscribe("notif_chan", "updates")
-        await asyncio.sleep(0.1)  # Give it time to propagate
+        await asyncio.sleep(0.1)
         self.assertFalse(last_notified.is_set())
 
-        # 4. Last subscriber leaves
         await sub2.unsubscribe("notif_chan", "updates")
         await asyncio.wait_for(last_notified.wait(), timeout=2.0)
         self.assertTrue(last_notified.is_set())

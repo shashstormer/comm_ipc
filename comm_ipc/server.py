@@ -15,9 +15,9 @@ from comm_ipc import security
 
 
 class CommIPCServer:
-    def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH, 
+    def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH,
                  error_policy: str = "ignore", connection_secret: str = None,
-                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate", 
+                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate",
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
                  verbose: bool = False):
         self.running = None
@@ -42,12 +42,14 @@ class CommIPCServer:
         self._writer_locks: Dict[asyncio.StreamWriter, asyncio.Lock] = {}
         self.subscribers: Dict[str, Dict[str, Set[str]]] = {}
         self.sub_owners: Dict[str, Dict[str, str]] = {}
-        
+        self.sub_params: Dict[str, Dict[str, Any]] = {}
+        self.event_schemas: Dict[str, Dict[str, Any]] = {}
+
     def _log(self, message: str, level: str = "info", client_id: str = None):
         log_msg = f"[SERVER {self.server_id}] {message}"
         if self.verbose:
             print(log_msg)
-            
+
         asyncio.create_task(self._system_broadcast("__comm_ipc_logs", {
             "type": "receive",
             "channel": "__comm_ipc_logs",
@@ -65,7 +67,8 @@ class CommIPCServer:
                 if cid in self.clients:
                     try:
                         self.clients[cid].close()
-                    except: pass
+                    except:
+                        pass
                     del self.clients[cid]
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -80,11 +83,12 @@ class CommIPCServer:
             if ident.get("type") == "identify":
                 proposed_id = ident.get("client_id")
                 if proposed_id in self.clients:
-                    await self._send_to_writer(writer, {"type": "error", "message": f"Client ID {proposed_id} already in use"})
+                    await self._send_to_writer(writer,
+                                               {"type": "error", "message": f"Client ID {proposed_id} already in use"})
                     writer.close()
                     return
                 client_id = proposed_id
-                
+
                 if self.connection_secret_hash:
                     challenge = security.generate_challenge()
                     self.auth_challenges[client_id] = {
@@ -97,22 +101,25 @@ class CommIPCServer:
                         "challenge": challenge,
                         "server_id": self.server_id
                     })
-                    
+
                     try:
                         len_data = await asyncio.wait_for(reader.readexactly(4), timeout=10.0)
                         length = struct.unpack(">I", len_data)[0]
                         data = await reader.readexactly(length)
                         resp = msgpack.unpackb(data, raw=False)
-                        
+
                         if resp.get("type") == "conn_proof":
                             proof = resp.get("proof")
-                            expected = security.compute_signature(self.connection_secret_hash.encode(), {"challenge": challenge})
-                            
+                            expected = security.compute_signature(self.connection_secret_hash.encode(),
+                                                                  {"challenge": challenge})
+
                             if hmac.compare_digest(expected, proof):
                                 self.auth_challenges[client_id]["authenticated"] = True
-                                await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
+                                await self._send_to_writer(writer, {"type": "identified", "client_id": client_id,
+                                                                    "server_id": self.server_id})
                             else:
-                                await self._send_to_writer(writer, {"type": "error", "message": "Authentication failed"})
+                                await self._send_to_writer(writer,
+                                                           {"type": "error", "message": "Authentication failed"})
                                 await writer.drain()
                                 writer.close()
                                 return
@@ -124,7 +131,8 @@ class CommIPCServer:
                         return
                 else:
                     if not self._reporting_error:
-                        await self._send_to_writer(writer, {"type": "identified", "client_id": client_id, "server_id": self.server_id})
+                        await self._send_to_writer(writer, {"type": "identified", "client_id": client_id,
+                                                            "server_id": self.server_id})
 
                     self._log(f"Client {client_id} identified", client_id=client_id)
                 self.clients[client_id] = writer
@@ -138,7 +146,7 @@ class CommIPCServer:
                     msg = msgpack.unpackb(data, raw=False)
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                     break
-                
+
                 if msg.get("type") == "ping":
                     await self._send_to_writer(writer, {"type": "pong"})
                     continue
@@ -148,7 +156,7 @@ class CommIPCServer:
                         await self._send_to_writer(writer, {"type": "error", "message": "Not authenticated"})
                         writer.close()
                         return
-                
+
                 await self.process_message(client_id, msg)
 
         except asyncio.IncompleteReadError:
@@ -161,11 +169,12 @@ class CommIPCServer:
                     if client_id in self.channel_members[channel]:
                         is_owner = (self.channel_members[channel][0] == client_id)
                         self.channel_members[channel].remove(client_id)
-                        
+
                         if is_owner and self.channel_policy == "terminate" and self.channel_members[channel]:
                             for other_id in list(self.channel_members[channel]):
                                 if other_id in self.clients:
-                                    await self._send_to_client(other_id, {"type": "error", "message": "Channel owner disconnected, channel terminated"})
+                                    await self._send_to_client(other_id, {"type": "error",
+                                                                          "message": "Channel owner disconnected, channel terminated"})
                                     if channel in self.channels and other_id in self.channels[channel]:
                                         self.channels[channel].remove(other_id)
                                     if channel in self.providers:
@@ -208,7 +217,7 @@ class CommIPCServer:
 
             if writer in self.active_writers:
                 self.active_writers.remove(writer)
-            
+
             if writer in self._writer_locks:
                 del self._writer_locks[writer]
 
@@ -252,11 +261,11 @@ class CommIPCServer:
         if chan_name in self.channel_passwords:
             proof = reg.get("proof")
             challenge_id = reg.get("challenge_id")
-            
+
             if not proof:
                 challenge = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
                 challenge_id = str(uuid.uuid4())
-                
+
                 if client_id not in self.auth_challenges:
                     self.auth_challenges[client_id] = {}
                 self.auth_challenges[client_id][challenge_id] = {
@@ -264,7 +273,7 @@ class CommIPCServer:
                     "reg": reg,
                     "timestamp": int(time.time())
                 }
-                
+
                 await self._send_to_client(client_id, {
                     "type": "auth_challenge",
                     "channel": chan_name,
@@ -282,7 +291,7 @@ class CommIPCServer:
                 })
                 await self._report_error(Exception("Invalid or expired challenge"), client_id)
                 return
-            
+
             challenge_data = self.auth_challenges[client_id].pop(challenge_id)
             if time.time() - challenge_data["timestamp"] > 60:
                 await self._send_to_client(client_id, {
@@ -292,13 +301,13 @@ class CommIPCServer:
                 })
                 await self._report_error(Exception("Challenge expired"), client_id)
                 return
-            
+
             expected_proof = hmac.new(
                 self.channel_passwords[chan_name].encode(),
                 challenge_data["challenge"].encode(),
                 hashlib.sha256
             ).hexdigest()
-            
+
             if not hmac.compare_digest(expected_proof, proof):
                 await self._send_to_client(client_id, {
                     "type": "response",
@@ -307,7 +316,7 @@ class CommIPCServer:
                 })
                 await self._report_error(Exception("Invalid channel password"), client_id)
                 return
-            
+
             original_reg = challenge_data["reg"]
             reg = original_reg
             is_provider = reg.get("is_provider", False)
@@ -340,16 +349,60 @@ class CommIPCServer:
                     })
                     await self._report_error(Exception(err_msg), client_id)
                     return
-            
+
             if chan_name not in self.providers:
                 self.providers[chan_name] = {}
             self.providers[chan_name][event] = client_id
+
+            if chan_name not in self.event_schemas:
+                self.event_schemas[chan_name] = {}
+            self.event_schemas[chan_name][event] = {
+                "param_schema": reg.get("param_schema"),
+                "return_schema": reg.get("return_schema")
+            }
+
+            await self._broadcast_to_channel(chan_name, {
+                "type": "metadata_update",
+                "channel": chan_name,
+                "name": event,
+                "stype": "event",
+                "owner": client_id,
+                "param_schema": reg.get("param_schema"),
+                "return_schema": reg.get("return_schema")
+            }, exclude_client=client_id)
         else:
             is_stream = False
             if chan_name not in self.channels:
                 self.channels[chan_name] = []
             if client_id not in self.channels[chan_name]:
                 self.channels[chan_name].append(client_id)
+
+            events = {}
+            if chan_name in self.providers:
+                for ev, pid in self.providers[chan_name].items():
+                    schemas = self.event_schemas.get(chan_name, {}).get(ev, {})
+                    events[ev] = {
+                        "owner": pid,
+                        "param_schema": schemas.get("param_schema"),
+                        "return_schema": schemas.get("return_schema"),
+                        "stype": "event"
+                    }
+
+            subs = {}
+            if chan_name in self.sub_owners:
+                for sn, pid in self.sub_owners[chan_name].items():
+                    subs[sn] = {
+                        "owner": pid,
+                        "param_schema": self.sub_params.get(chan_name, {}).get(sn),
+                        "stype": "subscription"
+                    }
+
+            await self._send_to_client(client_id, {
+                "type": "channel_sync",
+                "channel": chan_name,
+                "events": events,
+                "subscriptions": subs
+            })
 
         await self._system_broadcast("__comm_ipc_system", {
             "type": "receive",
@@ -380,7 +433,7 @@ class CommIPCServer:
         chan = msg.get("channel")
         pwd = msg.get("password")
         rid = msg.get("request_id")
-        
+
         if chan in self.channel_members and self.channel_members[chan][0] != client_id:
             if rid:
                 await self._send_to_client(client_id, {
@@ -401,7 +454,8 @@ class CommIPCServer:
             others = [cid for cid in self.channel_members.get(chan, []) if cid != client_id]
             for cid in others:
                 if cid in self.clients:
-                    await self._send_to_client(cid, {"type": "error", "message": "Channel password changed, please reconnect"})
+                    await self._send_to_client(cid, {"type": "error",
+                                                     "message": "Channel password changed, please reconnect"})
                     if chan in self.channels and cid in self.channels[chan]:
                         self.channels[chan].remove(cid)
                     if chan in self.providers:
@@ -458,7 +512,7 @@ class CommIPCServer:
 
     async def _handle_response(self, client_id: str, msg: Dict):
         target_id = msg.get("target_id")
-        if not self._prepare_message(msg, client_id): 
+        if not self._prepare_message(msg, client_id):
             return
         if target_id:
             await self._send_to_client(target_id, msg)
@@ -482,13 +536,13 @@ class CommIPCServer:
     def _prepare_message(self, msg: Dict, client_id: str) -> bool:
         if self.server_id in msg.get("path", []):
             return False
-            
+
         msg["sender_id"] = client_id
         if "timestamp" not in msg:
             msg["timestamp"] = int(time.time())
         if "origin_server_id" not in msg:
             msg["origin_server_id"] = self.server_id
-        
+
         msg["path"] = msg.get("path", []) + [self.server_id]
         return True
 
@@ -501,6 +555,12 @@ class CommIPCServer:
                     continue
                 await self._send_to_client(target_id, msg)
 
+    async def _broadcast_to_channel(self, chan: str, msg: Dict, exclude_client: str = None):
+        if chan in self.channels:
+            for tid in self.channels[chan]:
+                if tid != exclude_client:
+                    await self._send_to_client(tid, msg)
+
     async def _send_to_client(self, client_id: str, msg: Dict):
         if client_id in self.clients:
             writer = self.clients[client_id]
@@ -509,7 +569,7 @@ class CommIPCServer:
     async def _send_to_writer(self, writer: asyncio.StreamWriter, msg: Any):
         if writer not in self._writer_locks:
             self._writer_locks[writer] = asyncio.Lock()
-        
+
         lock = self._writer_locks[writer]
         async with lock:
             try:
@@ -541,7 +601,7 @@ class CommIPCServer:
                 }
                 self._log(str(e).split(":")[0], level="error", client_id=client_id)
                 await self._system_broadcast("__comm_ipc_errors", err_msg)
-                
+
                 if client_id and client_id in self.clients:
                     try:
                         await self._send_to_writer(self.clients[client_id], {
@@ -557,7 +617,7 @@ class CommIPCServer:
     async def run(self, socket_path: str = None, host: str = None, port: int = None, ssl_context=None):
         if socket_path:
             self.socket_path = socket_path
-        
+
         server = None
         try:
             if host and port:
@@ -566,7 +626,7 @@ class CommIPCServer:
                 if os.path.exists(self.socket_path):
                     os.remove(self.socket_path)
                 server = await asyncio.start_unix_server(self.handle_client, self.socket_path)
-            
+
             async with server:
                 await server.serve_forever()
         except asyncio.CancelledError:
@@ -591,18 +651,34 @@ class CommIPCServer:
 
         if not chan or not sub_name:
             if rid:
-                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "error": "channel and sub_name required"})
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid,
+                                                       "error": "channel and sub_name required"})
             return
 
         if chan not in self.sub_owners:
             self.sub_owners[chan] = {}
-        
+
         if sub_name in self.sub_owners[chan] and self.sub_owners[chan][sub_name] != client_id:
             if rid:
-                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "error": f"Subscription {sub_name} already owned by another client"})
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid,
+                                                       "error": f"Subscription {sub_name} already owned by another client"})
             return
 
         self.sub_owners[chan][sub_name] = client_id
+
+        if chan not in self.sub_params:
+            self.sub_params[chan] = {}
+        self.sub_params[chan][sub_name] = msg.get("schema")
+
+        await self._broadcast_to_channel(chan, {
+            "type": "metadata_update",
+            "channel": chan,
+            "name": sub_name,
+            "stype": "subscription",
+            "owner": client_id,
+            "param_schema": msg.get("schema")
+        }, exclude_client=client_id)
+
         self._log(f"Client {client_id} added subscription {sub_name} on channel {chan}", client_id=client_id)
 
         if rid:
@@ -616,18 +692,20 @@ class CommIPCServer:
         if chan in self.sub_owners and self.sub_owners[chan].get(sub_name) == client_id:
             await self._remove_subscription(chan, sub_name)
             if rid:
-                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "data": {"success": True}})
+                await self._send_to_client(client_id,
+                                           {"type": "response", "request_id": rid, "data": {"success": True}})
         else:
             if rid:
-                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "error": "Not the owner or subscription does not exist"})
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid,
+                                                       "error": "Not the owner or subscription does not exist"})
 
     async def _remove_subscription(self, chan: str, sub_name: str):
         if chan in self.sub_owners:
             self.sub_owners[chan].pop(sub_name, None)
-        
+
         if chan in self.subscribers and sub_name in self.subscribers[chan]:
             self.subscribers[chan].pop(sub_name, None)
-        
+
         self._log(f"Subscription {sub_name} on channel {chan} removed")
 
     async def _handle_subscribe(self, client_id: str, msg: Dict):
@@ -708,7 +786,7 @@ class CommIPCServer:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
-        
+
         for w in list(self.active_writers):
             try:
                 w.close()

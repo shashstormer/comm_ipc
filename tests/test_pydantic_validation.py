@@ -12,6 +12,13 @@ class User(BaseModel):
     name: str
     tags: List[str] = []
 
+class GreetResponse(BaseModel):
+    msg: str
+
+class UpdateModel(BaseModel):
+    val: int
+    meta: Optional[str] = None
+
 
 class TestPydanticValidation(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -28,21 +35,16 @@ class TestPydanticValidation(unittest.IsolatedAsyncioTestCase):
         ch = await client.open("test")
         
         async def handler(cd):
-            # cd.data should be a dict produced by Pydantic model_dump
             user = cd.data
             return {"msg": f"Hello {user['name']} ({user['id']})"}
             
-        await ch.add_event("greet", call=handler, parameters=User, returns={"msg": str})
+        await ch.add_event("greet", call=handler, parameters=User, returns=GreetResponse)
         
-        # 1. Valid call
         print("Sending valid event...")
         res = await asyncio.wait_for(ch.event("greet", {"id": 1, "name": "Alice", "tags": ["admin"]}), timeout=2.0)
         print("Received response:", res.data)
         self.assertEqual(res.data, {"msg": "Hello Alice (1)"})
         
-        # 2. Invalid call (missing tag) - validation error on caller side or provider side?
-        # In our implementation, caller validates before sending (event method), 
-        # and provider validates before handling (handle_call).
         with self.assertRaises(Exception):
             await ch.event("greet", {"id": "wrong", "name": "Alice"})
             
@@ -52,8 +54,7 @@ class TestPydanticValidation(unittest.IsolatedAsyncioTestCase):
         provider = CommIPC(client_id="provider", socket_path=self.socket_path)
         p_ch = await provider.open("pubsub")
         
-        # Register subscription with schema
-        await p_ch.add_subscription("updates", parameters={"val": int, "meta": Optional[str]})
+        await p_ch.add_subscription("updates", parameters=UpdateModel)
         
         subscriber = CommIPC(client_id="subscriber", socket_path=self.socket_path)
         s_ch = await subscriber.open("pubsub")
@@ -64,12 +65,10 @@ class TestPydanticValidation(unittest.IsolatedAsyncioTestCase):
             
         await s_ch.subscribe("updates", on_data)
         
-        # 1. Valid publish
         await p_ch.publish("updates", {"val": 100})
         data = await asyncio.wait_for(received.get(), timeout=1.0)
-        self.assertEqual(data, {"val": 100, "meta": None}) # Pydantic adds None for optional fields if schema is a dict
+        self.assertEqual(data, {"val": 100, "meta": None})
         
-        # 2. Invalid publish (should raise locally)
         with self.assertRaises(Exception):
             await p_ch.publish("updates", {"val": "not-an-int"})
             

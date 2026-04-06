@@ -2,6 +2,7 @@ import asyncio
 import unittest
 import os
 from tests.base import start_test_server, stop_test_server
+from pydantic import BaseModel
 from comm_ipc.client import CommIPC
 from comm_ipc.bridge import CommIPCBridge
 from comm_ipc.comm_data import CommData
@@ -40,9 +41,12 @@ class TestBridgeIPC(unittest.IsolatedAsyncioTestCase):
         p_a = CommIPC(client_id="provider-a", socket_path=self.socket_a)
         ch_a = await asyncio.wait_for(p_a.open("cross"), timeout=2.0)
 
+        class GreetParams(BaseModel):
+            name: str
+
         async def greet_call(cd): return f"Hello {cd.data['name']}"
 
-        await ch_a.add_event("greet", call=greet_call, parameters={"name": str})
+        await ch_a.add_event("greet", call=greet_call, parameters=GreetParams)
 
         await asyncio.sleep(0.5)
 

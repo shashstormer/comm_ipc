@@ -1,17 +1,18 @@
 import asyncio
 import hashlib
 import hmac
-import msgpack
+import inspect
 import struct
 import uuid
-import inspect
-from typing import Dict, Any, Optional, Callable, Union, Type
+from typing import Dict, Any, Optional, Callable, Type
+
+import msgpack
 from pydantic import BaseModel
 
-from comm_ipc.channel import CommIPCChannel
-from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIMEOUT, DEFAULT_HEARTBEAT_INTERVAL
-from comm_ipc.comm_data import CommData
 from comm_ipc import security
+from comm_ipc.channel import CommIPCChannel
+from comm_ipc.comm_data import CommData
+from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIMEOUT, DEFAULT_HEARTBEAT_INTERVAL
 
 
 class CommIPC:
@@ -199,15 +200,18 @@ class CommIPC:
                     "channel": chan.name,
                     "is_provider": True,
                     "event": name,
-                    "is_stream": info.get("is_stream", False)
+                    "is_stream": info.get("is_stream", False),
+                    "param_schema": info.get("param_schema"),
+                    "return_schema": info.get("return_schema")
                 })
             if hasattr(chan, 'subscriptions'):
-                for sub_name in chan.subscriptions:
+                for sub_name, sinfo in chan.subscriptions.items():
                     await self.send_msg({
                         "type": "add_subscription",
                         "client_id": self.client_id,
                         "channel": chan.name,
-                        "sub_name": sub_name
+                        "sub_name": sub_name,
+                        "schema": sinfo.get("param_schema")
                     })
 
     async def _handle_message(self, msg: Dict):
@@ -297,6 +301,30 @@ class CommIPC:
 
                 asyncio.create_task(handle())
 
+        elif mtype == "channel_sync":
+            chan_name = msg.get("channel")
+            if chan_name in self.channels:
+                chan = self.channels[chan_name]
+                events = msg.get("events", {})
+                subs = msg.get("subscriptions", {})
+                for name, info in events.items():
+                    chan.remote_schemas[name] = info
+                for name, info in subs.items():
+                    chan.remote_schemas[name] = info
+
+        elif mtype == "metadata_update":
+            chan_name = msg.get("channel")
+            if chan_name in self.channels:
+                chan = self.channels[chan_name]
+                name = msg.get("name")
+                stype = msg.get("stype")
+                chan.remote_schemas[name] = {
+                    "owner": msg.get("owner"),
+                    "param_schema": msg.get("param_schema"),
+                    "return_schema": msg.get("return_schema"),
+                    "stype": stype
+                }
+
         elif mtype in ("broadcast", "send", "receive"):
             chan_name = msg.get("channel")
             if chan_name in self.channels:
@@ -348,17 +376,21 @@ class CommIPC:
                 err = Exception(mtext)
                 await self.on_error(err)
 
-    async def add_subscription(self, chan: str, sub_name: str, parameters: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None):
+    async def add_subscription(self, chan: str, sub_name: str, parameters: Optional[Type[BaseModel]] = None):
         if not self._ready.is_set():
             await self.connect()
         rid = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending_calls[rid] = fut
+        
+        schema = parameters.model_json_schema() if parameters else None
+        
         await self.send_msg({
             "type": "add_subscription",
             "channel": chan,
             "sub_name": sub_name,
             "request_id": rid,
+            "schema": schema
         })
         return await fut
 

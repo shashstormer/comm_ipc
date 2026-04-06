@@ -2,9 +2,9 @@ import asyncio
 import inspect
 import time
 import uuid
-from typing import Callable, Dict, Any, List, Union, get_origin, get_args, Optional, Type
+from typing import Callable, Dict, Any, List, Optional, Type
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel
 
 from comm_ipc import security
 from comm_ipc.comm_data import CommData
@@ -80,7 +80,9 @@ class CommIPCChannel:
             "channel": self.name,
             "is_provider": True,
             "event": name,
-            "is_stream": is_stream
+            "is_stream": is_stream,
+            "param_schema": param_schema,
+            "return_schema": return_schema
         })
 
         try:
@@ -141,8 +143,8 @@ class CommIPCChannel:
             if rid in self.parent.active_streams:
                 del self.parent.active_streams[rid]
 
-    async def add_stream(self, name: str, call: Callable, parameters: Dict = None):
-        await self.add_event(name, call, parameters)
+    async def add_stream(self, name: str, call: Callable, parameters: Optional[Type[BaseModel]] = None):
+        await self.add_event(name, call, parameters=parameters)
 
     async def broadcast(self, event_name: str, data: Any):
         msg = await self._create_message("broadcast", event_name, data)
@@ -158,7 +160,7 @@ class CommIPCChannel:
             "parameters": parameters,
             "param_schema": param_schema
         }
-        return await self.parent.add_subscription(self.name, sub_name, parameters=parameters, schema=param_schema)
+        return await self.parent.add_subscription(self.name, sub_name, parameters=parameters)
 
     async def remove_subscription(self, sub_name: str):
         self.subscriptions.pop(sub_name, None)
@@ -204,13 +206,11 @@ class CommIPCChannel:
 
     def explore(self) -> Dict[str, Any]:
         """Provides a consolidated view of all discovered events and subscriptions in this channel."""
-        # Mix local events (provided by this client) and remote events (discovered from server)
         all_info = {
             "events": {},
             "subscriptions": {}
         }
 
-        # Local events
         for name, info in self.events.items():
             all_info["events"][name] = {
                 "owner": self.parent.client_id,
@@ -219,14 +219,12 @@ class CommIPCChannel:
                 "returns": info["return_schema"]
             }
 
-        # Local subscriptions
         for name, info in self.subscriptions.items():
             all_info["subscriptions"][name] = {
                 "owner": self.parent.client_id,
                 "parameters": info["param_schema"]
             }
 
-        # Remote info from server
         for name, info in self.remote_schemas.items():
             stype = info.get("type", "event")
             if stype == "event":

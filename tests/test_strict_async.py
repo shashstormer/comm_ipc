@@ -15,12 +15,9 @@ class TestStrictAsync(unittest.IsolatedAsyncioTestCase):
             os.remove(self.socket_path)
 
     async def test_sync_callback_failure(self):
-        # This test verifies that providing a sync callback fails predictably
-        # because the library now assumes everything is a coroutine and awaits it.
         provider = CommIPC(client_id="provider", socket_path=self.socket_path)
         ch_p = await provider.open("strict")
         
-        # 1. PROVIDER SIDE: Sync handler for RPC
         def sync_handler(_):
             return "fail"
         await ch_p.add_event("call_sync", call=sync_handler)
@@ -28,16 +25,12 @@ class TestStrictAsync(unittest.IsolatedAsyncioTestCase):
         caller = CommIPC(client_id="caller", socket_path=self.socket_path)
         ch_c = await caller.open("strict")
         
-        # When called, the provider will try to `await handler(cd)`
-        # This will raise TypeError on the provider side, which is reported back to the caller.
         with self.assertRaises(Exception) as cm:
             await ch_c.event("call_sync", {})
             
         err_msg = str(cm.exception)
-        # Check for typical Python error when awaiting a non-awaitable
         self.assertIn("can't be used in 'await' expression", err_msg)
         
-        # 2. SUBSCRIBER SIDE: Sync callback for Pub/Sub
         err_event = asyncio.Event()
         async def on_err(e): 
             if "can't be used in 'await' expression" in str(e):
@@ -50,13 +43,10 @@ class TestStrictAsync(unittest.IsolatedAsyncioTestCase):
             pass
         await s_ch.subscribe("topic", sync_on_msg)
         
-        # Now publish to the topic
         await ch_p.add_subscription("topic")
-        # Give some time for registration to propagate
         await asyncio.sleep(0.1)
         await ch_p.publish("topic", "ping")
         
-        # The subscriber's listen loop will try to await sync_on_msg and trigger on_error
         await asyncio.wait_for(err_event.wait(), timeout=2.0)
         self.assertTrue(err_event.is_set())
         

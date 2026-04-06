@@ -2,6 +2,7 @@ import asyncio
 import os
 import unittest
 
+from pydantic import BaseModel
 from comm_ipc.client import CommIPC
 from tests.base import start_test_server, stop_test_server
 
@@ -20,13 +21,16 @@ class TestStreamIPC(unittest.IsolatedAsyncioTestCase):
         provider = CommIPC(client_id="provider", socket_path=self.socket_path)
         chan_p = await provider.open("streaming")
 
+        class CountParams(BaseModel):
+            n: int
+
         async def count_to(cd):
             n = cd.data["n"]
             for i in range(1, n + 1):
                 yield i
                 await asyncio.sleep(0.01)
 
-        await chan_p.add_stream("count", call=count_to, parameters={"n": int})
+        await chan_p.add_stream("count", call=count_to, parameters=CountParams)
 
         consumer = CommIPC(client_id="consumer", socket_path=self.socket_path)
         chan_c = await consumer.open("streaming")

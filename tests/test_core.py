@@ -1,9 +1,9 @@
 import asyncio
 import os
 import unittest
-from typing import Union
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from typing import Optional
 from comm_ipc.channel import CommIPCChannel
 from comm_ipc.client import CommIPC
 from comm_ipc.comm_data import CommData
@@ -23,9 +23,13 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
 
     async def test_rpc_call(self):
         provider = CommIPC(client_id="provider", socket_path=self.socket_path)
+        class AddParams(BaseModel):
+            a: int
+            b: int
+
         chan_p = await provider.open("math")
         async def add(cd: CommData): return cd.data["a"] + cd.data["b"]
-        await chan_p.add_event("add", call=add, parameters={"a": int, "b": int})
+        await chan_p.add_event("add", call=add, parameters=AddParams)
         consumer = CommIPC(client_id="consumer", socket_path=self.socket_path)
         chan_c = await consumer.open("math")
         result = await chan_c.event("add", {"a": 5, "b": 10})
@@ -65,13 +69,16 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError: pass
 
     async def test_validation_logic(self):
+        class SchemaModel(BaseModel):
+            age: int
+            opt: Optional[int] = None
+
         t_client = CommIPC()
         chan = CommIPCChannel("test", t_client)
-        schema = {"age": int, "opt": Union[int, None]}
-        with self.assertRaises(ValidationError): chan.validate_data("not-dict", schema)
-        with self.assertRaises(ValidationError): chan.validate_data({}, schema)
-        with self.assertRaises(ValidationError): chan.validate_data({"age": None}, schema)
-        chan.validate_data({"age": 10, "opt": None}, schema)
+        with self.assertRaises(ValidationError): chan.validate_data("not-dict", SchemaModel)
+        with self.assertRaises(ValidationError): chan.validate_data({}, SchemaModel)
+        with self.assertRaises(ValidationError): chan.validate_data({"age": None}, SchemaModel)
+        chan.validate_data({"age": 10, "opt": None}, SchemaModel)
 
     async def test_error_policies_and_callbacks(self):
         srv = CommIPCServer(error_policy="raise")
@@ -149,7 +156,10 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         async def h(cd: CommData):
             n = cd.data["n"]
             for i in range(n): yield i
-        await ch_p.add_event("ev", call=h)
+        class StreamParams(BaseModel):
+            n: int
+
+        await ch_p.add_event("ev", call=h, parameters=StreamParams)
 
         client = CommIPC(socket_path=self.socket_path)
         results = []
