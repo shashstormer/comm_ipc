@@ -2,9 +2,9 @@ import asyncio
 import os
 import unittest
 import uuid
-import time
-from comm_ipc.server import CommIPCServer
+
 from comm_ipc.client import CommIPC
+from comm_ipc.server import CommIPCServer
 
 SOCKET_A = f"/tmp/test_adv_{uuid.uuid4().hex}.sock"
 
@@ -45,11 +45,11 @@ class TestAdvancedMgmt(unittest.IsolatedAsyncioTestCase):
         
         c1 = CommIPC(client_id="owner", socket_path=SOCKET_A)
         c2 = CommIPC(client_id="other", socket_path=SOCKET_A)
+
+        await c1.open("test-chan")
+        await c2.open("test-chan")
         
-        ch1 = await c1.open("test-chan")
-        ch2 = await c2.open("test-chan")
-        
-        with self.assertRaises(Exception) as cm:
+        with self.assertRaises(Exception):
             await c2.set_password("test-chan", "secure")
             
         await c1.set_password("test-chan", "secure")

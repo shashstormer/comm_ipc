@@ -1,11 +1,12 @@
 import asyncio
 import hashlib
 import hmac
-import json
+import msgpack
 import struct
 import uuid
 import inspect
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Union, Type
+from pydantic import BaseModel
 
 from comm_ipc.channel import CommIPCChannel
 from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIMEOUT, DEFAULT_HEARTBEAT_INTERVAL
@@ -73,13 +74,14 @@ class CommIPC:
 
         self._log("Connecting to server...")
         try:
-            await self._send_msg_unlocked({"type": "identify", "client_id": self.client_id})
+            async with self._send_lock:
+                await self._send_to_socket_unlocked({"type": "identify", "client_id": self.client_id})
 
             try:
                 len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
                 length = struct.unpack(">I", len_data)[0]
                 data = await asyncio.wait_for(self.reader.readexactly(length), timeout=self.data_timeout)
-                resp = json.loads(data.decode())
+                resp = msgpack.unpackb(data, raw=False)
             except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                 raise ConnectionError("Timeout or connection lost during identification")
 
@@ -95,7 +97,7 @@ class CommIPC:
                 len_data = await self.reader.readexactly(4)
                 length = struct.unpack(">I", len_data)[0]
                 data = await self.reader.readexactly(length)
-                resp = json.loads(data.decode())
+                resp = msgpack.unpackb(data, raw=False)
 
             if resp.get("type") == "identified":
                 self.client_id = resp.get("client_id")
@@ -107,7 +109,6 @@ class CommIPC:
             if self.writer:
                 try:
                     self.writer.close()
-                    # Await closure to prevent ResourceWarning
                     await asyncio.wait_for(self.writer.wait_closed(), timeout=1.0)
                 except:
                     pass
@@ -127,7 +128,7 @@ class CommIPC:
                     if not len_data: break
                     length = struct.unpack(">I", len_data)[0]
                     data = await asyncio.wait_for(self.reader.readexactly(length), timeout=self.data_timeout)
-                    msg = json.loads(data.decode())
+                    msg = msgpack.unpackb(data, raw=False)
                     asyncio.create_task(self._handle_message(msg))
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                     break
@@ -135,10 +136,7 @@ class CommIPC:
             pass
         except Exception as e:
             if self.on_error:
-                if asyncio.iscoroutinefunction(self.on_error):
-                    await self.on_error(e)
-                else:
-                    self.on_error(e)
+                await self.on_error(e)
         finally:
             self._ready.clear()
             for rid, fut in list(self.pending_calls.items()):
@@ -158,7 +156,7 @@ class CommIPC:
     async def _reconnect(self):
         delay = 1
         while self.auto_reconnect:
-            if self.reconnect_max_tries > 0 and self._reconnect_count >= self.reconnect_max_tries:
+            if 0 < self.reconnect_max_tries <= self._reconnect_count:
                 self._log("Max reconnection attempts reached.")
                 await self.close()
                 break
@@ -203,13 +201,18 @@ class CommIPC:
                     "event": name,
                     "is_stream": info.get("is_stream", False)
                 })
+            if hasattr(chan, 'subscriptions'):
+                for sub_name in chan.subscriptions:
+                    await self.send_msg({
+                        "type": "add_subscription",
+                        "client_id": self.client_id,
+                        "channel": chan.name,
+                        "sub_name": sub_name
+                    })
 
     async def _handle_message(self, msg: Dict):
         if self.on_msg:
-            if asyncio.iscoroutinefunction(self.on_msg):
-                asyncio.create_task(self.on_msg(msg))
-            else:
-                self.on_msg(msg)
+            asyncio.create_task(self.on_msg(msg))
         mtype = msg.get("type")
         if mtype == "response":
             rid = msg.get("request_id")
@@ -282,14 +285,13 @@ class CommIPC:
                                 })
                     except Exception as i_e:
                         if self.on_error:
-                            if inspect.iscoroutinefunction(self.on_error):
-                                await self.on_error(i_e)
-                            else:
-                                self.on_error(i_e)
+                            await self.on_error(i_e)
+                        
+                        target_id = msg.get("sender_id") or (i_cd.sender_id if 'i_cd' in locals() else None)
                         await self.send_msg({
                             "type": "response",
                             "request_id": rid,
-                            "target_id": i_cd.sender_id,
+                            "target_id": target_id,
                             "error": str(i_e)
                         })
 
@@ -299,8 +301,12 @@ class CommIPC:
             chan_name = msg.get("channel")
             if chan_name in self.channels:
                 chan = self.channels[chan_name]
-                cd = CommData.from_dict(msg)
-                await chan.handle_receive(cd)
+                try:
+                    cd = CommData.from_dict(msg)
+                    await chan.handle_receive(cd)
+                except Exception as e:
+                    if self.on_error:
+                        await self.on_error(e)
 
         elif mtype == "auth_challenge":
             chan_name = msg.get("channel")
@@ -340,10 +346,73 @@ class CommIPC:
             
             if self.on_error:
                 err = Exception(mtext)
-                if asyncio.iscoroutinefunction(self.on_error):
-                    await self.on_error(err)
-                else:
-                    self.on_error(err)
+                await self.on_error(err)
+
+    async def add_subscription(self, chan: str, sub_name: str, parameters: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None):
+        if not self._ready.is_set():
+            await self.connect()
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+        await self.send_msg({
+            "type": "add_subscription",
+            "channel": chan,
+            "sub_name": sub_name,
+            "request_id": rid,
+        })
+        return await fut
+
+    async def remove_subscription(self, chan: str, sub_name: str):
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+        await self.send_msg({
+            "type": "remove_subscription",
+            "channel": chan,
+            "sub_name": sub_name,
+            "request_id": rid
+        })
+        return await fut
+
+    async def subscribe(self, chan: str, sub_name: str, callback: Callable):
+        if not self._ready.is_set():
+            await self.connect()
+        
+        if chan not in self.channels:
+            await self.open(chan)
+        
+        self.channels[chan].on_receive(callback, f"subscription.{sub_name}.data")
+        
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+        await self.send_msg({
+            "type": "subscribe",
+            "channel": chan,
+            "sub_name": sub_name,
+            "request_id": rid
+        })
+        return await fut
+
+    async def unsubscribe(self, chan: str, sub_name: str):
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+        await self.send_msg({
+            "type": "unsubscribe",
+            "channel": chan,
+            "sub_name": sub_name,
+            "request_id": rid
+        })
+        return await fut
+
+    async def publish(self, chan: str, sub_name: str, data: Any):
+        await self.send_msg({
+            "type": "publish",
+            "channel": chan,
+            "sub_name": sub_name,
+            "data": data
+        })
 
     async def send_msg(self, msg: Dict):
         async with self._send_lock:
@@ -358,21 +427,19 @@ class CommIPC:
 
     async def _send_to_socket_unlocked(self, msg: Dict):
         try:
-            data = json.dumps(msg).encode()
+            data = msgpack.packb(msg, use_bin_type=True)
             length = struct.pack(">I", len(data))
             self.writer.write(length + data)
             await self.writer.drain()
         except Exception as e:
             if self.on_error:
-                if asyncio.iscoroutinefunction(self.on_error):
-                    await self.on_error(e)
-                else:
-                    self.on_error(e)
-
-    async def _send_msg_unlocked(self, msg: Dict):
-        """DEPRECATED: Use _send_to_socket_unlocked instead with explicit locking."""
-        async with self._send_lock:
-            await self._send_to_socket_unlocked(msg)
+                await self.on_error(e)
+            
+            rid = msg.get("request_id")
+            if rid and rid in self.pending_calls:
+                fut = self.pending_calls.pop(rid)
+                if not fut.done():
+                    fut.set_exception(e)
 
     async def open(self, chan: str, password: str = None) -> CommIPCChannel:
         if not self._ready.is_set():
@@ -516,7 +583,4 @@ class CommIPC:
                 await asyncio.wait_for(self.writer.wait_closed(), timeout=1.0)
             except Exception as e:
                 if self.on_error:
-                    if asyncio.iscoroutinefunction(self.on_error):
-                        await self.on_error(e)
-                    else:
-                        self.on_error(e)
+                    await self.on_error(e)

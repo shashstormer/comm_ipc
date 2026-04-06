@@ -2,6 +2,7 @@ import asyncio
 import os
 import unittest
 from typing import Union
+from pydantic import ValidationError
 
 from comm_ipc.channel import CommIPCChannel
 from comm_ipc.client import CommIPC
@@ -67,9 +68,9 @@ class TestCoreIPC(unittest.IsolatedAsyncioTestCase):
         t_client = CommIPC()
         chan = CommIPCChannel("test", t_client)
         schema = {"age": int, "opt": Union[int, None]}
-        with self.assertRaises(TypeError): chan.validate_data("not-dict", schema)
-        with self.assertRaises(ValueError): chan.validate_data({}, schema)
-        with self.assertRaises(TypeError): chan.validate_data({"age": None}, schema)
+        with self.assertRaises(ValidationError): chan.validate_data("not-dict", schema)
+        with self.assertRaises(ValidationError): chan.validate_data({}, schema)
+        with self.assertRaises(ValidationError): chan.validate_data({"age": None}, schema)
         chan.validate_data({"age": 10, "opt": None}, schema)
 
     async def test_error_policies_and_callbacks(self):

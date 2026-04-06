@@ -12,7 +12,7 @@ def derive_key(secret: str, salt: bytes = b"") -> bytes:
     return hashlib.pbkdf2_hmac('sha256', secret.encode(), salt, 100000, dklen=32)
 
 def compute_signature(key: bytes, msg_dict: Dict[str, Any]) -> str:
-    immutable_keys = ["sender_id", "channel", "event", "data", "timestamp", "request_id", "target_id", "is_stream", "is_final", "origin_server_id", "challenge"]
+    immutable_keys = ["sender_id", "channel", "event", "data", "timestamp", "request_id", "target_id", "is_stream", "is_final", "origin_server_id", "challenge", "sub_name"]
     parts = []
     
     for k in sorted(immutable_keys):

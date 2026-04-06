@@ -63,7 +63,7 @@ class TestCoverageEdge(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_loop_prevention(self):
         b = CommIPCBridge("b1", self.socket_path, self.socket_path)
         b.c2.server_id = "target-srv"
-        d = CommData("s", "srv", "ch", "ev", {}, path=["target-srv"])
+        d = CommData(sender_id="s", server_id="srv", channel="ch", event="ev", data={}, path=["target-srv"])
         await b._relay_receive(d, b.c1, b.c2)
 
     async def test_client_error_reporting(self):

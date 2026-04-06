@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import hmac
-import json
+import msgpack
 import os
 import secrets
 import string
@@ -20,6 +20,7 @@ class CommIPCServer:
                  system_passwords: Dict[str, str] = None, channel_policy: str = "terminate", 
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
                  verbose: bool = False):
+        self.running = None
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
         self.clients: Dict[str, asyncio.StreamWriter] = {}
@@ -39,6 +40,8 @@ class CommIPCServer:
         self.data_timeout = data_timeout
         self._cleanup_task = None
         self._writer_locks: Dict[asyncio.StreamWriter, asyncio.Lock] = {}
+        self.subscribers: Dict[str, Dict[str, Set[str]]] = {}
+        self.sub_owners: Dict[str, Dict[str, str]] = {}
         
     def _log(self, message: str, level: str = "info", client_id: str = None):
         log_msg = f"[SERVER {self.server_id}] {message}"
@@ -72,7 +75,7 @@ class CommIPCServer:
             len_data = await reader.readexactly(4)
             length = struct.unpack(">I", len_data)[0]
             data = await reader.readexactly(length)
-            ident = json.loads(data.decode())
+            ident = msgpack.unpackb(data, raw=False)
 
             if ident.get("type") == "identify":
                 proposed_id = ident.get("client_id")
@@ -99,7 +102,7 @@ class CommIPCServer:
                         len_data = await asyncio.wait_for(reader.readexactly(4), timeout=10.0)
                         length = struct.unpack(">I", len_data)[0]
                         data = await reader.readexactly(length)
-                        resp = json.loads(data.decode())
+                        resp = msgpack.unpackb(data, raw=False)
                         
                         if resp.get("type") == "conn_proof":
                             proof = resp.get("proof")
@@ -132,7 +135,7 @@ class CommIPCServer:
                     if not len_data: break
                     length = struct.unpack(">I", len_data)[0]
                     data = await asyncio.wait_for(reader.readexactly(length), timeout=self.data_timeout)
-                    msg = json.loads(data.decode())
+                    msg = msgpack.unpackb(data, raw=False)
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                     break
                 
@@ -189,6 +192,20 @@ class CommIPCServer:
                     if not self.providers[channel]:
                         del self.providers[channel]
 
+                for channel in list(self.sub_owners.keys()):
+                    for sub_name in list(self.sub_owners[channel].keys()):
+                        if self.sub_owners[channel][sub_name] == client_id:
+                            await self._remove_subscription(channel, sub_name)
+                    if not self.sub_owners.get(channel):
+                        self.sub_owners.pop(channel, None)
+
+                for channel in list(self.subscribers.keys()):
+                    for sub_name in list(self.subscribers[channel].keys()):
+                        if client_id in self.subscribers[channel][sub_name]:
+                            await self._unsubscribe(client_id, channel, sub_name)
+                    if not self.subscribers.get(channel):
+                        self.subscribers.pop(channel, None)
+
             if writer in self.active_writers:
                 self.active_writers.remove(writer)
             
@@ -215,6 +232,16 @@ class CommIPCServer:
             await self._handle_send(client_id, msg)
         elif mtype == "set_password":
             await self._handle_set_password(client_id, msg)
+        elif mtype == "add_subscription":
+            await self._handle_add_subscription(client_id, msg)
+        elif mtype == "remove_subscription":
+            await self._handle_remove_subscription(client_id, msg)
+        elif mtype == "subscribe":
+            await self._handle_subscribe(client_id, msg)
+        elif mtype == "unsubscribe":
+            await self._handle_unsubscribe(client_id, msg)
+        elif mtype == "publish":
+            await self._handle_publish(client_id, msg)
 
     async def _handle_register(self, client_id: str, reg: Dict):
         chan_name = reg.get("channel")
@@ -486,7 +513,7 @@ class CommIPCServer:
         lock = self._writer_locks[writer]
         async with lock:
             try:
-                data = json.dumps(msg).encode()
+                data = msgpack.packb(msg, use_bin_type=True)
                 length = struct.pack(">I", len(data))
                 writer.write(length + data)
                 await writer.drain()
@@ -556,6 +583,123 @@ class CommIPCServer:
                 await asyncio.wait_for(server.wait_closed(), timeout=2.0)
             if self._cleanup_task:
                 self._cleanup_task.cancel()
+
+    async def _handle_add_subscription(self, client_id: str, msg: Dict):
+        chan = msg.get("channel")
+        sub_name = msg.get("sub_name")
+        rid = msg.get("request_id")
+
+        if not chan or not sub_name:
+            if rid:
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "error": "channel and sub_name required"})
+            return
+
+        if chan not in self.sub_owners:
+            self.sub_owners[chan] = {}
+        
+        if sub_name in self.sub_owners[chan] and self.sub_owners[chan][sub_name] != client_id:
+            if rid:
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "error": f"Subscription {sub_name} already owned by another client"})
+            return
+
+        self.sub_owners[chan][sub_name] = client_id
+        self._log(f"Client {client_id} added subscription {sub_name} on channel {chan}", client_id=client_id)
+
+        if rid:
+            await self._send_to_client(client_id, {"type": "response", "request_id": rid, "data": {"success": True}})
+
+    async def _handle_remove_subscription(self, client_id: str, msg: Dict):
+        chan = msg.get("channel")
+        sub_name = msg.get("sub_name")
+        rid = msg.get("request_id")
+
+        if chan in self.sub_owners and self.sub_owners[chan].get(sub_name) == client_id:
+            await self._remove_subscription(chan, sub_name)
+            if rid:
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "data": {"success": True}})
+        else:
+            if rid:
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid, "error": "Not the owner or subscription does not exist"})
+
+    async def _remove_subscription(self, chan: str, sub_name: str):
+        if chan in self.sub_owners:
+            self.sub_owners[chan].pop(sub_name, None)
+        
+        if chan in self.subscribers and sub_name in self.subscribers[chan]:
+            self.subscribers[chan].pop(sub_name, None)
+        
+        self._log(f"Subscription {sub_name} on channel {chan} removed")
+
+    async def _handle_subscribe(self, client_id: str, msg: Dict):
+        chan = msg.get("channel")
+        sub_name = msg.get("sub_name")
+        rid = msg.get("request_id")
+
+        if chan not in self.subscribers:
+            self.subscribers[chan] = {}
+        if sub_name not in self.subscribers[chan]:
+            self.subscribers[chan][sub_name] = set()
+
+        is_first = (len(self.subscribers[chan][sub_name]) == 0)
+        self.subscribers[chan][sub_name].add(client_id)
+
+        if is_first:
+            owner_id = self.sub_owners.get(chan, {}).get(sub_name)
+            if owner_id:
+                await self._send_to_client(owner_id, {
+                    "type": "receive",
+                    "channel": chan,
+                    "event": f"subscription.{sub_name}.first",
+                    "data": {"sub_name": sub_name},
+                    "timestamp": int(time.time())
+                })
+
+        if rid:
+            await self._send_to_client(client_id, {"type": "response", "request_id": rid, "data": {"success": True}})
+
+    async def _handle_unsubscribe(self, client_id: str, msg: Dict):
+        chan = msg.get("channel")
+        sub_name = msg.get("sub_name")
+        rid = msg.get("request_id")
+        await self._unsubscribe(client_id, chan, sub_name)
+        if rid:
+            await self._send_to_client(client_id, {"type": "response", "request_id": rid, "data": {"success": True}})
+
+    async def _unsubscribe(self, client_id: str, chan: str, sub_name: str):
+        if chan in self.subscribers and sub_name in self.subscribers[chan]:
+            if client_id in self.subscribers[chan][sub_name]:
+                self.subscribers[chan][sub_name].remove(client_id)
+                if len(self.subscribers[chan][sub_name]) == 0:
+                    owner_id = self.sub_owners.get(chan, {}).get(sub_name)
+                    if owner_id:
+                        await self._send_to_client(owner_id, {
+                            "type": "receive",
+                            "channel": chan,
+                            "event": f"subscription.{sub_name}.last",
+                            "data": {"sub_name": sub_name},
+                            "timestamp": int(time.time())
+                        })
+
+    async def _handle_publish(self, client_id: str, msg: Dict):
+        chan = msg.get("channel")
+        sub_name = msg.get("sub_name")
+        data = msg.get("data")
+
+        if self.sub_owners.get(chan, {}).get(sub_name) != client_id:
+            return
+
+        if chan in self.subscribers and sub_name in self.subscribers[chan]:
+            pub_msg = {
+                "type": "receive",
+                "channel": chan,
+                "event": f"subscription.{sub_name}.data",
+                "data": data,
+                "sender_id": client_id,
+                "server_id": self.server_id,
+                "timestamp": int(time.time())
+            }
+            for sub_id in list(self.subscribers[chan][sub_name]):
+                await self._send_to_client(sub_id, pub_msg)
 
     async def stop(self):
         if self._cleanup_task:

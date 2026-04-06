@@ -12,7 +12,10 @@ license = { file = "LICENSE.txt" }
 description = "A lightweight IPC library with bridge and streaming support"
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = []
+dependencies = [
+    "pydantic>=2.0",
+    "msgpack>=1.0.0",
+]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio"]
