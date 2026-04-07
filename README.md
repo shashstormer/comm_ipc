@@ -1,197 +1,257 @@
-# CommIPC: Asynchronous Secure Distributed Inter-Process Communication
+# CommIPC: Asynchronous IPC for Linux
 
-CommIPC is an asynchronous Inter-Process Communication (IPC) system designed for Linux environments. Written in pure Python, it provides communication through Unix Domain Sockets for local processes and TCP for cross-network communication, featuring integrated bridging, synchronization, and security mechanisms.
+CommIPC is an Inter-Process Communication (IPC) system for Linux environments. It uses Pydantic v2 for data validation and Python's `asyncio` for concurrency.
 
-## Table of Contents
+## Connectivity and Transport
 
-- [Key Features](#key-features)
-- [Architecture Overview](#architecture-overview)
-- [Components](#components)
-- [Usage Guide](#usage-guide)
-    - [Basic RPC (Request-Response)](#basic-rpc-request-response)
-    - [Streaming Responses](#streaming-responses)
-    - [Cross-Network Bridging](#cross-network-bridging)
-- [Performance and Scalability](#performance-and-scalability)
-- [Testing](#testing)
-- [License](#license)
+CommIPC supports several transport layers:
+- **Local**: Unix Domain Sockets.
+- **Remote**: TCP connections.
+- **Secure**: SSL/TLS encryption for TCP.
 
-## Key Features
-
-- **Zero-Trust Security**:
-    - **HMAC-SHA256 Handshake**: Mandatory cryptographic challenge for every client connection.
-    - **End-to-End Signature**: All channel messages are signed with HMAC-SHA256 based on channel passwords, ensuring data integrity even if the server is compromised.
-- **Advanced Channel Management**:
-    - **Owner-Based Administration**: The first client to join a channel is the Admin/Owner, with exclusive rights to manage security.
-    - **Explicit Password Protection**: Support for protecting channels (including system channels) with unique, cryptographically derived keys.
-    - **Flexible Lifecycle Policies**: Configurable policies for handling owner disconnection (`terminate` or `promote`).
-- **High Resilience**:
-    - **Auto-Reconnect**: Robust reconnection logic with exponential backoff and transparent state restoration (channels, providers).
-    - **Synchronous Persistence**: Client APIs wait for server confirmation for registrations and security changes, preventing communication hangs.
-- **Dependency-Free**: Implemented entirely using the Python standard library, requiring no external packages.
-
-## Architecture Overview
-
-The system operates as a hub-and-spoke model locally, which can be extended into a mesh or linear topology using bridges.
-
-```mermaid
-graph TD
-    subgraph "Local Network A"
-        SrvA["CommIPCServer (Primary)"]
-        CliA1["Client A1"] <--> SrvA
-        CliA2["Client A2"] <--> SrvA
-    end
-    
-    subgraph "Bridge Link"
-        Bridge["CommIPCBridge"]
-    end
-    
-    subgraph "Remote Network B"
-        SrvB["CommIPCServer (Secondary)"]
-        CliB1["Client B1"] <--> SrvB
-    end
-    
-    SrvA <--> Bridge <--> SrvB
-```
-
-## Components
-
-- **CommIPCServer**: The central message coordinator responsible for client lifecycle management, authentication, and message routing.
-- **CommIPC**: The primary client interface for application integration.
-- **CommIPCChannel**: A high-level abstraction layer for interacting with specific logical communication channels.
-- **CommIPCBridge**: A specialized interconnect service that synchronizes providers and subscribers across discrete server instances.
-
-## Usage Guide
-
-### Basic RPC (Request-Response)
-
-#### Service Provider
+### Initialization
 
 ```python
-import asyncio
+from comm_ipc.server import CommIPCServer
 from comm_ipc.client import CommIPC
 
-async def main():
-    client = CommIPC(client_id="math_service")
-    channel = await client.open("math_operations")
-    
-    def add(params):
-        return params.data["a"] + params.data["b"]
-        
-    await channel.add_event("sum", call=add)
-    
-    # Maintain the service loop
-    await asyncio.Future() 
+# Server setup
+server = CommIPCServer(socket_path="/tmp/comm_ipc.sock")
+await server.run()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Client setup
+client = CommIPC(socket_path="/tmp/comm_ipc.sock")
+await client.connect()
 ```
 
-#### Service Consumer
+---
+
+## System Reference: CommIPCServer
+
+CommIPCServer manages routing and security handshakes.
+
+### Constructor: `CommIPCServer`
+- `server_id` (str): Unique server ID.
+- `socket_path` (str): Path to the Unix socket. Default: `/tmp/comm_ipc.sock`.
+- `error_policy` (str): Behavior on exceptions (`"ignore"`, `"raise"`, `"broadcast"`).
+- `connection_secret` (str): Secret for HMAC-SHA256 handshakes.
+- `system_passwords` (Dict[str, str]): Pre-set channel passwords.
+- `channel_policy` (str): Behavior on owner disconnect (e.g., `"terminate"`).
+- `idle_timeout` (float): Header read timeout. Default: `60.0`.
+- `data_timeout` (float): Body read timeout. Default: `60.0`.
+- `verbose` (bool): log output.
+
+### Methods
+- `await run(socket_path, host, port, ssl_context)`: Start the server on a socket or TCP address.
+- `await stop()`: Close all links and stop the server.
+
+---
+
+## System Reference: CommIPC (Client)
+
+CommIPC is the main client interface.
+
+### Constructor: `CommIPC`
+- `client_id` (str): Unique client ID.
+- `socket_path` (str): Path to the Unix socket.
+- `on_error` (Callable): Callback for errors.
+- `ssl_context`: SSL context for TCP.
+- `connection_secret` (str): Handshake secret.
+- `auto_reconnect` (bool): Automatic reconnection. Default: `True`.
+- `reconnect_max_tries` (int): Retry limit. `0` means unlimited.
+- `idle_timeout` (float): Header read timeout.
+- `data_timeout` (float): Body read timeout.
+- `heartbeat_interval` (float): Ping frequency. Default: `30.0`.
+- `verbose` (bool): Log output.
+
+### Methods
+- `await connect(host, port, ssl_context, connection_secret)`: Establish a link.
+- `await open(chan, password)`: Open a channel and return a `CommIPCChannel`.
+- `await set_password(chan, password)`: Set a channel password (owner only).
+- `await call(chan, ev, data)`: Perform a request-response call.
+- `stream(chan, ev, data)`: Async iterator for data streams.
+- `await add_subscription(chan, sub_name, parameters)`: Register a subscription endpoint.
+- `await remove_subscription(chan, sub_name)`: Remove a subscription.
+- `await subscribe(chan, sub_name, callback)`: Receive data from a stream.
+- `await unsubscribe(chan, sub_name)`: Stop receiving data.
+- `await publish(chan, sub_name, data)`: Send data to subscribers.
+- `await wait_till_end()`: Wait until the connection terminates.
+- `await close()`: Disconnect from the server.
+- `on_msg`: Callback for all incoming messages.
+
+---
+
+## System Reference: CommIPCChannel
+
+`CommIPCChannel` objects handle channel-specific interactions.
+
+### Methods
+- `await add_event(name, call, parameters, returns)`: Register an RPC handler.
+- `await add_stream(name, call, parameters)`: Register a stream handler.
+- `await event(event_name, data)`: Call a remote RPC event.
+- `stream(event_name, data)`: Collect a remote stream.
+- `await broadcast(event_name, data)`: Send to all channel members.
+- `await send(event_name, data)`: Send to a provider without a response.
+- `await add_subscription(sub_name, parameters)`: Register a channel subscription.
+- `await remove_subscription(sub_name)`: Remove a channel subscription.
+- `await subscribe(sub_name, callback)`: Channel-level subscription.
+- `await unsubscribe(sub_name)`: Channel-level unsubscription.
+- `await publish(sub_name, data)`: Channel-level publishing.
+- `on_receive(call, event_name)`: Attach a listener for specific or all messages.
+- `explore()`: List discovered events and subscriptions.
+- `get_schema(name)`: Get the Pydantic schema for an endpoint.
+
+---
+
+## Code Examples
+
+### Request-Response (RPC)
 
 ```python
-import asyncio
-from comm_ipc.client import CommIPC
+from pydantic import BaseModel
 
-async def main():
-    client = CommIPC(client_id="application_client")
-    channel = await client.open("math_operations")
-    
-    response = await channel.event("sum", {"a": 15, "b": 25})
-    print(f"Calculated Sum: {response.data}") # Expected Output: 40
+class MathParams(BaseModel):
+    a: int
+    b: int
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Provider
+async def add_handler(cd):
+    return {"result": cd.data["a"] + cd.data["b"]}
+
+channel = await client.open("math")
+await channel.add_event("add", add_handler, parameters=MathParams)
+
+# Consumer
+res = await channel.event("add", {"a": 10, "b": 20})
+print(res.data["result"])
 ```
 
-### Streaming Responses
-
-#### Stream Provider
+### Publisher-Subscriber
 
 ```python
-async def sequence_generator(request):
-    n = request.data.get("limit", 10)
-    for i in range(n):
+# Publisher
+await channel.add_subscription("telemetry")
+await channel.publish("telemetry", {"status": "ok"})
+
+# Subscriber
+async def on_data(cd):
+    print(cd.data)
+
+await channel.subscribe("telemetry", on_data)
+```
+
+### Streaming
+
+```python
+# Provider
+async def count_up(cd):
+    for i in range(cd.data["limit"]):
         yield i
-        await asyncio.sleep(0.05)
 
-await channel.add_stream("data_feed", call=sequence_generator)
+await channel.add_stream("counter", count_up)
+
+# Consumer
+async for chunk in channel.stream("counter", {"limit": 5}):
+    print(chunk.data)
 ```
 
-#### Stream Consumer
+### Messaging and Listeners
 
 ```python
-async for chunk in channel.stream("data_feed", {"limit": 5}):
-    print(f"Received Chunk: {chunk.data}")
+# Send: Directed message to a provider (no response)
+await channel.send("log", {"level": "info", "msg": "event started"})
+
+# Broadcast: Message to every client in the channel
+await channel.broadcast("system_update", {"status": "maintenance"})
+
+# Listen: specific event
+async def on_update(cd):
+    print(f"Update: {cd.data}")
+
+channel.on_receive(on_update, "system_update")
+
+# Listen: generic channel observer
+async def on_any(cd):
+    print(f"Channel {cd.channel} got {cd.event}")
+
+channel.on_receive(on_any)
 ```
 
-### Cross-Network Bridging
+### Security and Passwords
+
+```python
+# Set password (owner)
+channel = await client.open("secure")
+await client.set_password("secure", "password123")
+
+# Open with password (client)
+channel = await client.open("secure", password="password123")
+```
+
+---
+
+## System Reference: CommData (Message Object)
+
+`CommData` models all messages and metadata.
+
+### Fields
+- `sender_id` (str): Sender identifier.
+- `server_id` (str): Routing server identifier.
+- `channel` (str): Channel name.
+- `event` (str): Event name or subscription ID.
+- `data` (Any): Message content.
+- `timestamp` (int): Creation timestamp.
+- `metadata` (Dict): Additional data.
+- `request_id` (str): Correlation ID for calls.
+- `target_id` (str): Recipient identifier.
+- `path` (List[str]): Chain of routing servers.
+- `is_stream` (bool): Stream flag.
+- `is_final` (bool): End-of-stream flag.
+- `signature` (str): Message integrity signature.
+- `origin_server_id` (str): First server in the chain.
+- `sub_name` (str): Subscription identifier.
+
+---
+
+## System Reference: CommIPCBridge
+
+`CommIPCBridge` synchronizes two separate hubs.
+
+### Constructor: `CommIPCBridge`
+- `bridge_id` (str): Bridge identifier.
+- `socket_path1`, `socket_path2` (str): Local socket paths.
+- `ssl_context1`, `ssl_context2`: SSL contexts.
+- `allowed_channels` (List[str]): List of channels to sync. Default: all.
+
+### Methods
+- `await connect(target1_params, target2_params)`: Connect two targets.
+- `await stop()`: Stop the bridge.
 
 ```python
 from comm_ipc.bridge import CommIPCBridge
 
-# Establishes a link between a local Unix socket and a remote TCP server
-bridge = CommIPCBridge(socket_path1="/tmp/local_service.sock")
+bridge = CommIPCBridge(bridge_id="bridge-1")
 await bridge.connect(
-    target1_params={}, 
-    target2_params={"host": "192.168.1.100", "port": 9000}
+    target1_params={"socket_path": "/tmp/s1.sock"},
+    target2_params={"socket_path": "/tmp/s2.sock"}
 )
 ```
 
-### Security & Channel Management
+---
 
-#### Protecting a Channel (Owner)
+## System Reference: System Channels
 
-```python
-# The first client to open the channel becomes the owner
-channel = await client.open("secure-data")
-await client.set_password("secure-data", "strong-password")
-```
+The server provides read-only channels for monitoring:
+- `__comm_ipc_logs`: Server log broadcast.
+- `__comm_ipc_errors`: Global error broadcast.
+- `__comm_ipc_system`: System event broadcast (e.g., `new_registration`).
 
-#### Joining a Protected Channel
+## Resilience
 
-```python
-# Fails if password is wrong or missing
-channel = await client.open("secure-data", password="strong-password")
-```
-
-#### Protecting System Channels
-
-You can secure internal system channels (logs, errors, registration events) by providing a `system_passwords` dictionary when initializing the server:
-
-```python
-server = CommIPCServer(
-    system_passwords={
-        "__comm_ipc_logs": "log-secret",
-        "__comm_ipc_errors": "error-secret",
-        "__comm_ipc_system": "sys-secret"
-    }
-)
-```
-
-## Performance and Resilience
-
-CommIPC is optimized for reliability:
-- **Auto-Reconnect**: Automatically recovers from server restarts and network interruptions.
-- **State Preservation**: Transparently restores all active channel memberships and event providers after a reconnection event.
-- **Optional Client Logging**: Clients are silent by default; set `verbose=True` during initialization to enable terminal logging.
-- **Unix Domain Sockets**: Minimizes latency for local-host communication by bypassing the network stack.
-
-## Testing
-
-The project maintains a comprehensive verification suite located in the `tests/` directory.
-
-```bash
-# Execute the full validation suite
-PYTHONPATH=. pytest tests/
-```
-
-The test coverage includes:
-- **Zero-Trust Verification**: HMAC handshakes, signature integrity, and E2E verification.
-- **Advanced Management**: Ownership logic, lifecycle policies, and resource cleanup.
-- **Resilience**: Auto-reconnect stability and state restoration.
-- **Distributed Systems**: Bridge synchronization and circular path detection.
-- **Streaming**: Asynchronous iterator support across local and remote instances.
+Clients recover state automatically if `auto_reconnect` is `True`. On reconnection, the client:
+1. Re-identifies with the same ID.
+2. Re-opens and authenticates active channels.
+3. Re-registers all handlers and endpoints.
 
 ## License
-
-This project is licensed under the LGPLv3 License.
+Licensed under the LGPLv3 License.
