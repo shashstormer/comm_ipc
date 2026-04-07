@@ -4,7 +4,7 @@ import hmac
 import inspect
 import struct
 import uuid
-from typing import Dict, Any, Optional, Callable, Type
+from typing import Dict, Any, Optional, Callable, Literal
 
 import msgpack
 from pydantic import BaseModel
@@ -20,6 +20,7 @@ class CommIPC:
                  ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0,
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
                  heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+                 return_type: Literal["dict", "model"] = "dict",
                  verbose: bool = False):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
@@ -32,6 +33,7 @@ class CommIPC:
         self.idle_timeout = idle_timeout
         self.data_timeout = data_timeout
         self.heartbeat_interval = heartbeat_interval
+        self.return_type = return_type
         self._is_closing = False
         self._reconnect_count = 0
         self.server_id: Optional[str] = None
@@ -228,7 +230,8 @@ class CommIPC:
                     fut.set_exception(Exception(msg["error"]))
                 else:
                     try:
-                        fut.set_result(CommData.from_dict(msg))
+                        cd = CommData.from_dict(msg)
+                        fut.set_result(cd)
                     except Exception as e:
                         fut.set_exception(e)
             else:
@@ -376,21 +379,19 @@ class CommIPC:
                 err = Exception(mtext)
                 await self.on_error(err)
 
-    async def add_subscription(self, chan: str, sub_name: str, parameters: Optional[Type[BaseModel]] = None):
+    async def add_subscription(self, chan: str, sub_name: str, return_schema: Optional[Dict] = None):
         if not self._ready.is_set():
             await self.connect()
         rid = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending_calls[rid] = fut
         
-        schema = parameters.model_json_schema() if parameters else None
-        
         await self.send_msg({
             "type": "add_subscription",
             "channel": chan,
             "sub_name": sub_name,
-            "request_id": rid,
-            "schema": schema
+            "return_schema": return_schema,
+            "request_id": rid
         })
         return await fut
 
@@ -439,6 +440,8 @@ class CommIPC:
         return await fut
 
     async def publish(self, chan: str, sub_name: str, data: Any):
+        if isinstance(data, BaseModel):
+            data = data.model_dump()
         await self.send_msg({
             "type": "publish",
             "channel": chan,
@@ -447,6 +450,8 @@ class CommIPC:
         })
 
     async def send_msg(self, msg: Dict):
+        if "data" in msg and isinstance(msg["data"], BaseModel):
+            msg["data"] = msg["data"].model_dump()
         async with self._send_lock:
             if not self.writer:
                 pass
@@ -474,8 +479,12 @@ class CommIPC:
                     fut.set_exception(e)
 
     async def open(self, chan: str, password: str = None) -> CommIPCChannel:
+        if chan in ["subscription"]:
+             raise ValueError(f"Channel name '{chan}' is reserved")
+
         if not self._ready.is_set():
             await self.connect()
+             
         if chan not in self.channels:
             channel = CommIPCChannel(chan, self, password=password)
             self.channels[chan] = channel

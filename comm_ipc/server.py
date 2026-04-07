@@ -648,12 +648,25 @@ class CommIPCServer:
         chan = msg.get("channel")
         sub_name = msg.get("sub_name")
         rid = msg.get("request_id")
+        return_schema = msg.get("return_schema")
 
         if not chan or not sub_name:
             if rid:
                 await self._send_to_client(client_id, {"type": "response", "request_id": rid,
                                                        "error": "channel and sub_name required"})
             return
+
+        if chan in ["subscription"]:
+             if rid:
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid,
+                                                       "error": f"Channel name {chan} is reserved"})
+             return
+
+        if sub_name.startswith("subscription."):
+             if rid:
+                await self._send_to_client(client_id, {"type": "response", "request_id": rid,
+                                                       "error": f"Subscription name {sub_name} is reserved"})
+             return
 
         if chan not in self.sub_owners:
             self.sub_owners[chan] = {}
@@ -668,7 +681,7 @@ class CommIPCServer:
 
         if chan not in self.sub_params:
             self.sub_params[chan] = {}
-        self.sub_params[chan][sub_name] = msg.get("schema")
+        self.sub_params[chan][sub_name] = return_schema
 
         await self._broadcast_to_channel(chan, {
             "type": "metadata_update",
@@ -676,7 +689,7 @@ class CommIPCServer:
             "name": sub_name,
             "stype": "subscription",
             "owner": client_id,
-            "param_schema": msg.get("schema")
+            "return_schema": return_schema
         }, exclude_client=client_id)
 
         self._log(f"Client {client_id} added subscription {sub_name} on channel {chan}", client_id=client_id)

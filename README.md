@@ -114,6 +114,7 @@ CommIPC is the main client interface.
 - `idle_timeout` (float): Header read timeout.
 - `data_timeout` (float): Body read timeout.
 - `heartbeat_interval` (float): Ping frequency. Default: `30.0`.
+- `return_type` (str): Data format (`"dict"` or `"model"`). Default: `"dict"`.
 - `verbose` (bool): Log output.
 
 ### Methods
@@ -126,7 +127,7 @@ CommIPC is the main client interface.
 - `await remove_subscription(chan, sub_name)`: Remove a subscription.
 - `await subscribe(chan, sub_name, callback)`: Receive data from a stream.
 - `await unsubscribe(chan, sub_name)`: Stop receiving data.
-- `await publish(chan, sub_name, data)`: Send data to subscribers.
+- `await publish(chan, sub_name, data)`: Send data to subscribers. Accepts dict or `BaseModel`.
 - `await wait_till_end()`: Wait until the connection terminates.
 - `await close()`: Disconnect from the server.
 - `on_msg`: Callback for all incoming messages.
@@ -148,7 +149,7 @@ CommIPC is the main client interface.
 - `await remove_subscription(sub_name)`: Remove a channel subscription.
 - `await subscribe(sub_name, callback)`: Channel-level subscription.
 - `await unsubscribe(sub_name)`: Channel-level unsubscription.
-- `await publish(sub_name, data)`: Channel-level publishing.
+- `await publish(sub_name, data)`: Channel-level publishing. Accepts dict or `BaseModel`.
 - `on_receive(call, event_name)`: Attach a listener for specific or all messages.
 - `explore()`: List discovered events and subscriptions.
 - `get_schema(name)`: Get the Pydantic schema for an endpoint.
@@ -161,6 +162,7 @@ CommIPC is the main client interface.
 
 ```python
 from pydantic import BaseModel
+from comm_ipc.client import CommIPC
 
 class MathParams(BaseModel):
     a: int
@@ -168,28 +170,37 @@ class MathParams(BaseModel):
 
 # Provider
 async def add_handler(cd):
-    return {"result": cd.data["a"] + cd.data["b"]}
+    assert isinstance(cd.data, MathParams)
+    return {"result": cd.data.a + cd.data.b}
 
+# Consumer
+client = CommIPC(return_type="model") # Enables automated model reception
 channel = await client.open("math")
 await channel.add_event("add", add_handler, parameters=MathParams)
 
-# Consumer
-res = await channel.event("add", {"a": 10, "b": 20})
-print(res.data["result"])
+res = await channel.event("add", MathParams(a=10, b=20))
+print(f"Result: {res.data['result']}") # cd.data is automatically a model instance
 ```
 
 ### Publisher-Subscriber
 
 ```python
+from pydantic import BaseModel
+
+class User(BaseModel):
+    id: int
+    name: str
+
 # Publisher
-await channel.add_subscription("telemetry")
-await channel.publish("telemetry", {"status": "ok"})
+await channel.add_subscription("news", model=User)
+await channel.publish("news", User(id=1, name="Alice"))
 
 # Subscriber
 async def on_data(cd):
-    print(cd.data)
+    # cd.data is automatically an instance of User (local or dynamic)
+    print(f"Got user: {cd.data.name}") 
 
-await channel.subscribe("telemetry", on_data)
+await channel.subscribe("news", on_data)
 ```
 
 ### Streaming

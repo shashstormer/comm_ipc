@@ -1,4 +1,3 @@
-import unittest
 import os
 import unittest
 
@@ -26,7 +25,7 @@ class TestSubscriptionLifecycle(unittest.IsolatedAsyncioTestCase):
             level: str
             code: int
 
-        await p_ch.add_subscription("status", parameters=StatusModel)
+        await p_ch.add_subscription("status", model=StatusModel)
         
         await p_ch.publish("status", {"level": "info", "code": 200})
         
