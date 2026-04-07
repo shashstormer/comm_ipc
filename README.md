@@ -1,6 +1,58 @@
 # CommIPC: Asynchronous IPC for Linux
 
-CommIPC is an Inter-Process Communication (IPC) system for Linux environments. It uses Pydantic v2 for data validation and Python's `asyncio` for concurrency.
+## Installation
+
+```bash
+pip install comm-ipc
+```
+
+## Why CommIPC?
+
+CommIPC bridges the gap between simple Unix sockets and complex message brokers like RabbitMQ. It gives you Type-Safe, Asynchronous communication with the ease of a local function call.
+
+---
+
+## Quick Start
+
+This script demonstrates a basic server and client interaction in a single file.
+
+```python
+import asyncio
+from comm_ipc.server import CommIPCServer
+from comm_ipc.client import CommIPC
+
+async def main():
+    # Start server
+    server = CommIPCServer(socket_path="/tmp/quickstart.sock")
+    server_task = asyncio.create_task(server.run())
+    await asyncio.sleep(0.1)  # Wait for server to start
+
+    # Start client
+    client = CommIPC(socket_path="/tmp/quickstart.sock")
+    await client.connect()
+    
+    channel = await client.open("demo")
+
+    # Register an event
+    async def hello_handler(cd):
+        return {"msg": f"Hello, {cd.data['name']}"}
+    
+    await channel.add_event("hello", hello_handler)
+
+    # Call the event
+    res = await channel.event("hello", {"name": "World"})
+    print(res.data["msg"])
+
+    # Shutdown
+    await client.close()
+    await server.stop()
+    server_task.cancel()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
 
 ## Connectivity and Transport
 
