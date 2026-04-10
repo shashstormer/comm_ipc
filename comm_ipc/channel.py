@@ -8,6 +8,7 @@ from pydantic import BaseModel, create_model
 
 from comm_ipc import security
 from comm_ipc.comm_data import CommData
+from comm_ipc.group import CommIPCGroup
 
 
 class CommIPCChannel:
@@ -23,6 +24,7 @@ class CommIPCChannel:
         self.generic_listeners: List[Callable] = []
         self.remote_schemas: Dict[str, Dict[str, Any]] = {}
         self._generated_models: Dict[str, Type[BaseModel]] = {}
+        self.group = CommIPCGroup(self)
 
     @property
     def password(self) -> Optional[str]:
@@ -107,7 +109,7 @@ class CommIPCChannel:
         return data
 
     async def add_event(self, name: str, call: Callable, parameters: Optional[Type[BaseModel]] = None,
-                        returns: Optional[Type[BaseModel]] = None):
+                        returns: Optional[Type[BaseModel]] = None, is_group: bool = False):
         is_stream = inspect.isasyncgenfunction(call)
 
         param_schema = parameters.model_json_schema() if parameters else None
@@ -121,6 +123,7 @@ class CommIPCChannel:
             "parameters": parameters,
             "returns": returns,
             "is_stream": is_stream,
+            "is_group": is_group,
             "param_schema": param_schema,
             "return_schema": return_schema
         }
@@ -142,6 +145,7 @@ class CommIPCChannel:
             "is_provider": True,
             "event": name,
             "is_stream": is_stream,
+            "is_group": is_group,
             "param_schema": param_schema,
             "return_schema": return_schema
         })

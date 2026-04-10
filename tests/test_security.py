@@ -78,7 +78,7 @@ class TestSecurityIPC(unittest.IsolatedAsyncioTestCase):
             await ch2.add_event("event1", call=lambda _: "fail")
         
         self.assertEqual(len(self.server.providers["dup_chan"]), 1)
-        self.assertEqual(self.server.providers["dup_chan"]["event1"], "p1")
+        self.assertEqual(self.server.providers["dup_chan"]["event1"][0], "p1")
         
         await c1.close()
         await c2.close()

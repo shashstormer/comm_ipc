@@ -8,7 +8,7 @@ import string
 import struct
 import uuid
 import time
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Literal
 
 from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIMEOUT
 from comm_ipc import security
@@ -17,8 +17,10 @@ from comm_ipc import security
 class CommIPCServer:
     def __init__(self, server_id: str = None, socket_path: str = SOCKET_PATH,
                  error_policy: str = "ignore", connection_secret: str = None,
-                 system_passwords: Dict[str, str] = None, channel_policy: str = "terminate",
+                 system_passwords: Dict[str, str] = None, channel_policy: Literal["terminate", "promote"] = "terminate",
+                 # terminate channel on owner disconnect, promote earliest joined member present in channel
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
+                 lb_policy: Literal["round-robin", "least-active"] = "least-active",
                  verbose: bool = False):
         self.running = None
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
@@ -30,7 +32,10 @@ class CommIPCServer:
         self.channel_members: Dict[str, List[str]] = {}
         self.channel_policy = channel_policy
         self.verbose = verbose
-        self.providers: Dict[str, Dict[str, str]] = {}
+        self.providers: Dict[str, Dict[str, List[str]]] = {}
+        self.lb_policy = lb_policy
+        self.active_calls: Dict[str, int] = {}
+        self.rr_indices: Dict[str, Dict[str, int]] = {}
         self.error_policy = error_policy
         self._reporting_error = False
         self.auth_challenges: Dict[str, Dict[str, Any]] = {}
@@ -170,16 +175,20 @@ class CommIPCServer:
                         is_owner = (self.channel_members[channel][0] == client_id)
                         self.channel_members[channel].remove(client_id)
 
-                        if is_owner and self.channel_policy == "terminate" and self.channel_members[channel]:
-                            for other_id in list(self.channel_members[channel]):
+                        if is_owner and self.channel_policy == "terminate":
+                            remaining = list(self.channel_members[channel])
+                            for other_id in remaining:
                                 if other_id in self.clients:
                                     await self._send_to_client(other_id, {"type": "error",
-                                                                          "message": "Channel owner disconnected, channel terminated"})
+                                                                          "message": f"Channel {channel} owner disconnected, channel terminated"})
                                     if channel in self.channels and other_id in self.channels[channel]:
                                         self.channels[channel].remove(other_id)
                                     if channel in self.providers:
-                                        evs = [ev for ev, pid in self.providers[channel].items() if pid == other_id]
-                                        for ev in evs: del self.providers[channel][ev]
+                                        evs = [ev for ev, pids in self.providers[channel].items() if other_id in pids]
+                                        for ev in evs:
+                                            self.providers[channel][ev].remove(other_id)
+                                            if not self.providers[channel][ev]:
+                                                del self.providers[channel][ev]
                             self.channel_members[channel] = []
 
                         if not self.channel_members[channel]:
@@ -196,10 +205,15 @@ class CommIPCServer:
                             del self.channels[channel]
                 for channel in list(self.providers.keys()):
                     for event in list(self.providers[channel].keys()):
-                        if self.providers[channel][event] == client_id:
-                            del self.providers[channel][event]
+                        if client_id in self.providers[channel][event]:
+                            self.providers[channel][event].remove(client_id)
+                            if not self.providers[channel][event]:
+                                del self.providers[channel][event]
                     if not self.providers[channel]:
                         del self.providers[channel]
+
+                if client_id in self.active_calls:
+                    del self.active_calls[client_id]
 
                 for channel in list(self.sub_owners.keys()):
                     for sub_name in list(self.sub_owners[channel].keys()):
@@ -336,29 +350,45 @@ class CommIPCServer:
                     "error": "Event name required for provider registration"
                 })
                 return
-            if chan_name in self.providers and event in self.providers[chan_name]:
-                existing_provider = self.providers[chan_name][event]
-                if existing_provider != client_id:
-                    err_msg = f"Provider already exists for {chan_name}:{event} (by {existing_provider})"
-                    await self._send_to_client(client_id, {
-                        "type": "response",
-                        "request_id": reg.get("request_id"),
-                        "channel": chan_name,
-                        "event": event,
-                        "error": err_msg
-                    })
-                    await self._report_error(Exception(err_msg), client_id)
-                    return
-
             if chan_name not in self.providers:
                 self.providers[chan_name] = {}
-            self.providers[chan_name][event] = client_id
+            if event not in self.providers[chan_name]:
+                self.providers[chan_name][event] = []
+
+            is_group = reg.get("is_group", False)
+            existing_meta = self.event_schemas.get(chan_name, {}).get(event, {})
+            existing_is_group = existing_meta.get("is_group", False)
+            pids = self.providers[chan_name][event]
+
+            if pids:
+                if not is_group or not existing_is_group:
+                    if client_id not in pids:
+                        err_msg = f"Provider already exists for {chan_name}:{event} and group mode is incompatible"
+                        await self._send_to_client(client_id, {
+                            "type": "response",
+                            "request_id": reg.get("request_id"),
+                            "channel": chan_name,
+                            "event": event,
+                            "error": err_msg
+                        })
+                        await self._report_error(Exception(err_msg), client_id)
+                        return
+
+                if client_id not in pids:
+                    self.providers[chan_name][event].append(client_id)
+                    if client_id not in self.active_calls:
+                        self.active_calls[client_id] = 0
+            else:
+                self.providers[chan_name][event].append(client_id)
+                if client_id not in self.active_calls:
+                    self.active_calls[client_id] = 0
 
             if chan_name not in self.event_schemas:
                 self.event_schemas[chan_name] = {}
             self.event_schemas[chan_name][event] = {
                 "param_schema": reg.get("param_schema"),
-                "return_schema": reg.get("return_schema")
+                "return_schema": reg.get("return_schema"),
+                "is_group": is_group
             }
 
             await self._broadcast_to_channel(chan_name, {
@@ -370,6 +400,14 @@ class CommIPCServer:
                 "param_schema": reg.get("param_schema"),
                 "return_schema": reg.get("return_schema")
             }, exclude_client=client_id)
+
+            await self._send_to_client(client_id, {
+                "type": "response",
+                "request_id": reg.get("request_id"),
+                "channel": chan_name,
+                "event": event,
+                "success": True
+            })
         else:
             is_stream = False
             if chan_name not in self.channels:
@@ -379,10 +417,10 @@ class CommIPCServer:
 
             events = {}
             if chan_name in self.providers:
-                for ev, pid in self.providers[chan_name].items():
+                for ev, pids in self.providers[chan_name].items():
                     schemas = self.event_schemas.get(chan_name, {}).get(ev, {})
                     events[ev] = {
-                        "owner": pid,
+                        "owner": pids[0] if pids else None,
                         "param_schema": schemas.get("param_schema"),
                         "return_schema": schemas.get("return_schema"),
                         "stype": "event"
@@ -459,8 +497,11 @@ class CommIPCServer:
                     if chan in self.channels and cid in self.channels[chan]:
                         self.channels[chan].remove(cid)
                     if chan in self.providers:
-                        events_to_remove = [ev for ev, pid in self.providers[chan].items() if pid == cid]
-                        for ev in events_to_remove: del self.providers[chan][ev]
+                        events_to_remove = [ev for ev, pids in self.providers[chan].items() if cid in pids]
+                        for ev in events_to_remove:
+                            self.providers[chan][ev].remove(cid)
+                            if not self.providers[chan][ev]:
+                                del self.providers[chan][ev]
 
         if rid:
             await self._send_to_client(client_id, {
@@ -476,9 +517,21 @@ class CommIPCServer:
 
         target_id = None
         if chan in self.providers and event in self.providers[chan]:
-            target_id = self.providers[chan][event]
+            pids = self.providers[chan][event]
+            if len(pids) == 1:
+                target_id = pids[0]
+            elif len(pids) > 1:
+                if self.lb_policy == "round-robin":
+                    if chan not in self.rr_indices: self.rr_indices[chan] = {}
+                    idx = self.rr_indices[chan].get(event, 0)
+                    target_id = pids[idx % len(pids)]
+                    self.rr_indices[chan][event] = (idx + 1) % len(pids)
+                else:  # least-active
+                    target_id = min(pids, key=lambda p: self.active_calls.get(p, 0))
 
         if target_id:
+            if self.lb_policy == "least-active":
+                self.active_calls[target_id] = self.active_calls.get(target_id, 0) + 1
             await self._send_to_client(target_id, msg)
         else:
             err_msg = f"No provider for {chan}:{event}"
@@ -515,6 +568,8 @@ class CommIPCServer:
         if not self._prepare_message(msg, client_id):
             return
         if target_id:
+            if self.lb_policy == "least-active" and client_id in self.active_calls:
+                self.active_calls[client_id] = max(0, self.active_calls.get(client_id, 0) - 1)
             await self._send_to_client(target_id, msg)
 
     async def _handle_broadcast(self, client_id: str, msg: Dict):
@@ -531,7 +586,17 @@ class CommIPCServer:
         event = msg.get("event")
         if not self._prepare_message(msg, client_id): return
         if chan in self.providers and event in self.providers[chan]:
-            await self._send_to_client(self.providers[chan][event], msg)
+            pids = self.providers[chan][event]
+            target_id = pids[0]
+            if len(pids) > 1:
+                if self.lb_policy == "round-robin":
+                    if chan not in self.rr_indices: self.rr_indices[chan] = {}
+                    idx = self.rr_indices[chan].get(event, 0)
+                    target_id = pids[idx % len(pids)]
+                    self.rr_indices[chan][event] = (idx + 1) % len(pids)
+                else:  # least-active
+                    target_id = min(pids, key=lambda p: self.active_calls.get(p, 0))
+            await self._send_to_client(target_id, msg)
 
     def _prepare_message(self, msg: Dict, client_id: str) -> bool:
         if self.server_id in msg.get("path", []):
@@ -657,16 +722,16 @@ class CommIPCServer:
             return
 
         if chan in ["subscription"]:
-             if rid:
+            if rid:
                 await self._send_to_client(client_id, {"type": "response", "request_id": rid,
                                                        "error": f"Channel name {chan} is reserved"})
-             return
+            return
 
         if sub_name.startswith("subscription."):
-             if rid:
+            if rid:
                 await self._send_to_client(client_id, {"type": "response", "request_id": rid,
                                                        "error": f"Subscription name {sub_name} is reserved"})
-             return
+            return
 
         if chan not in self.sub_owners:
             self.sub_owners[chan] = {}
