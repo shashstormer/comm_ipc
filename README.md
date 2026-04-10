@@ -88,7 +88,12 @@ CommIPCServer manages routing and security handshakes.
 - `error_policy` (str): Behavior on exceptions (`"ignore"`, `"raise"`, `"broadcast"`).
 - `connection_secret` (str): Secret for HMAC-SHA256 handshakes.
 - `system_passwords` (Dict[str, str]): Pre-set channel passwords.
-- `channel_policy` (str): Behavior on owner disconnect (e.g., `"terminate"`).
+- `channel_policy` (str): Behavior on owner disconnect. 
+  - `"terminate"`: Close the channel (default).
+  - `"promote"`: Promote the next earliest member to owner.
+- `lb_policy` (str): Load balancing policy for group events.
+  - `"least-active"`: Send to provider with fewest pending calls (default).
+  - `"round-robin"`: Cycle through providers sequentially.
 - `idle_timeout` (float): Header read timeout. Default: `60.0`.
 - `data_timeout` (float): Body read timeout. Default: `60.0`.
 - `verbose` (bool): log output.
@@ -139,13 +144,13 @@ CommIPC is the main client interface.
 `CommIPCChannel` objects handle channel-specific interactions.
 
 ### Methods
-- `await add_event(name, call, parameters, returns)`: Register an RPC handler.
-- `await add_stream(name, call, parameters)`: Register a stream handler.
+- `await add_event(name, call, parameters, returns, is_group)`: Register an RPC handler. If `is_group` is True, it registers as a load-balanced provider.
+- `await add_stream(name, call, parameters)`: Register a stream handler (automatically detects async generators).
 - `await event(event_name, data)`: Call a remote RPC event.
 - `stream(event_name, data)`: Collect a remote stream.
 - `await broadcast(event_name, data)`: Send to all channel members.
 - `await send(event_name, data)`: Send to a provider without a response.
-- `await add_subscription(sub_name, parameters)`: Register a channel subscription.
+- `await add_subscription(sub_name, model)`: Register a channel subscription schema.
 - `await remove_subscription(sub_name)`: Remove a channel subscription.
 - `await subscribe(sub_name, callback)`: Channel-level subscription.
 - `await unsubscribe(sub_name)`: Channel-level unsubscription.
@@ -156,6 +161,120 @@ CommIPC is the main client interface.
 
 ---
 
+## System Reference: CommIPCApp
+
+`CommIPCApp` provides a declarative, decorator-based interface for `CommIPCChannel`.
+
+### Constructor: `CommIPCApp`
+- `channel` (`CommIPCChannel`): The open channel instance to wrap.
+
+### Decorators & Methods
+- **`@app.provide(name, parameters, returns)`**: 
+  Registers an asynchronous handler as an event provider. Automatically detects if the handler is an async generator for streaming support.
+- **`@app.on(event_name)`**: 
+  Attaches a listener to the channel. If an `event_name` is provided, it also automatically handles the server-side `subscribe()` call.
+- **`@app.group.provide(name, parameters, returns)`**: 
+  Registers a load-balanced group event provider.
+- **`@app.subscription(name, model)`**: 
+  Declares a subscription schema. This is a non-blocking way to ensure the server is aware of the subscription metadata, which is required before calling `publish()`.
+- **`app.group(name: str = None)`**:
+  Returns a `CommIPCAppGroup` helper. If a `name` is provided, registrations will be made under that specific load-balanced group.
+
+### CommIPCAppGroup Reference
+- **`@group.provide(name, parameters, returns)`**:
+  Registers an event provider within the group. Calls to this event will be load-balanced across all providers in the group.
+
+---
+
+## System Reference: CommIPCGroup
+
+`CommIPCGroup` provides an interface for load-balanced event groups. It is accessed via `channel.group`.
+
+### Methods
+- **`__call__(name: str)`**:
+  Returns a `CommIPCGroup` instance scoped to the specified group name.
+- **`await provide(event, handler, parameters, returns)`**: 
+  Registers a provider for an event within this group.
+- **`await get(event, data)`**: 
+  Calls an event within the group (load balanced).
+- **`stream(event, data)`**: 
+  Returns an async iterator for a grouped stream (load balanced).
+
+---
+### Example Usage
+ 
+```python
+from comm_ipc.app import CommIPCApp
+from comm_ipc.comm_data import CommData
+from pydantic import BaseModel
+ 
+# 1. Open a channel
+chan = await client.open("math")
+app = CommIPCApp(chan)
+ 
+# 2. Define a data model
+class MathParams(BaseModel):
+    a: int
+    b: int
+ 
+# 3. Register a provider
+@app.provide("add", parameters=MathParams)
+async def add(cd: CommData):
+    return cd.data.a + cd.data.b
+ 
+# 4. Register a streaming provider (detected automatically)
+@app.provide("counter")
+async def count_up(cd: CommData):
+    for i in range(5):
+        yield {"count": i}
+ 
+# 5. Register a group provider
+@app.group.provide("mult")
+async def mult(cd: CommData):
+    return cd.data["a"] * cd.data["b"]
+ 
+# 6. Declare and listen to subscriptions
+@app.subscription("updates")
+class UpdateModel(BaseModel):
+    status: str
+ 
+@app.on("updates")
+async def handle_update(cd: CommData):
+    print(f"System Status: {cd.data.status}")
+```
+ 
+---
+ 
+### Load Balancing (Event Groups)
+ 
+When multiple providers register for the same event, it creates a conflict unless **Groups** are used. By grouping providers, the server automatically load-balances calls (using a `least-active` or `round-robin` policy).
+ 
+#### Standard API
+ 
+```python
+# Provider A
+await channel.group("workers").add_event("process", handle_a)
+ 
+# Provider B
+await channel.group("workers").add_event("process", handle_b)
+ 
+# Consumer
+res = await channel.group("workers").event("process", data)
+```
+ 
+#### Decorator API
+ 
+```python
+# Create a named group decorator
+workers = app.group("workers")
+ 
+@workers.provide("process")
+async def handle(cd):
+    ...
+```
+ 
+---
+ 
 ## Code Examples
 
 ### Request-Response (RPC)

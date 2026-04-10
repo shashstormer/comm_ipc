@@ -6,14 +6,19 @@ from pydantic import BaseModel
 
 class CommIPCAppGroup:
     """Helper for load-balanced group decorators."""
-    def __init__(self, app: 'CommIPCApp'):
+    def __init__(self, app: 'CommIPCApp', name: Optional[str] = None):
         self.app = app
+        self.name = name
+
+    def __call__(self, name: str) -> 'CommIPCAppGroup':
+        """Returns a new CommIPCAppGroup with the specified name."""
+        return CommIPCAppGroup(self.app, name)
 
     def provide(self, event: str, parameters: Optional[Type[BaseModel]] = None, 
                 returns: Optional[Type[BaseModel]] = None):
         """Decorator for registering a load-balanced group provider."""
         def decorator(handler):
-            self.app._do_registration(event, handler, parameters, returns, is_group=True)
+            self.app._do_registration(event, handler, parameters, returns, is_group=True, group_name=self.name)
             return handler
         return decorator
 
@@ -29,7 +34,8 @@ class CommIPCApp:
     def _do_registration(self, event_name: str, handler: Callable, 
                          parameters: Optional[Type[BaseModel]] = None,
                          returns: Optional[Type[BaseModel]] = None, 
-                         is_group: bool = False):
+                         is_group: bool = False,
+                         group_name: Optional[str] = None):
         """Internal non-blocking registration logic."""
         # 1. Update local state directly
         is_stream = inspect.isasyncgenfunction(handler)
@@ -37,8 +43,11 @@ class CommIPCApp:
         return_schema = returns.model_json_schema() if returns else None
         
         full_event_name = event_name
-        if is_group and hasattr(self.channel.group, '_get_event_name'):
-             full_event_name = self.channel.group._get_event_name(event_name)
+        if is_group:
+             grp = self.channel.group
+             if group_name:
+                 grp = grp(group_name)
+             full_event_name = grp._get_event_name(event_name)
 
         self.channel.events[full_event_name] = {
             "call": handler,

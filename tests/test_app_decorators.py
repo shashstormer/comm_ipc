@@ -40,6 +40,12 @@ async def test_app_decorators():
         async def mult(cd: CommData):
             return cd.data["a"] * cd.data["b"]
 
+        # Test named group provider
+        workers = app.group("workers")
+        @workers.provide("process")
+        async def process(cd: CommData):
+            return f"Processed {cd.data['val']}"
+
         await asyncio.sleep(0.5)
 
         res = await ipc.call("math", "add", {"a": 10, "b": 20})
@@ -47,6 +53,10 @@ async def test_app_decorators():
 
         res = await ipc.call("math", "mult", {"a": 5, "b": 6})
         assert res.data == 30
+
+        # Verify named group
+        res = await ipc.call("math", "workers.process", {"val": "data"})
+        assert res.data == "Processed data"
 
         await ipc.publish("math", "notify", {"msg": "hello"})
         await asyncio.sleep(0.2)
