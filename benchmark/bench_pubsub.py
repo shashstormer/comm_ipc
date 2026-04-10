@@ -36,8 +36,7 @@ async def run_pubsub_benchmark(num_msgs=1000):
     print(f"Running PubSub Latency benchmark ({num_msgs} messages)...")
     for _ in range(num_msgs):
         await chan_pub.publish("topic", {"t": time.perf_counter()})
-        if len(delays) % 100 == 0:
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0) # Yield to subscriber loop
 
     try:
         await asyncio.wait_for(received_event.wait(), timeout=10)
