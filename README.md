@@ -166,9 +166,13 @@ CommIPC is the main client interface.
 `CommIPCApp` provides a declarative, decorator-based interface for `CommIPCChannel`.
 
 ### Constructor: `CommIPCApp`
-- `channel` (`CommIPCChannel`): The open channel instance to wrap.
+- `channel` (`CommIPCChannel`, optional): The open channel instance to wrap. If provided, registration happens immediately.
 
-### Decorators & Methods
+### Methods
+- **`await app.register(channel)`**: 
+  Binds the app to a channel and registers all buffered handlers/listeners. This is the recommended way to initialize a top-level `CommIPCApp`.
+
+### Decorators
 - **`@app.provide(name, parameters, returns)`**: 
   Registers an asynchronous handler as an event provider. Automatically detects if the handler is an async generator for streaming support.
 - **`@app.on(event_name)`**: 
@@ -177,8 +181,8 @@ CommIPC is the main client interface.
   Registers a load-balanced group event provider.
 - **`@app.subscription(name, model)`**: 
   Declares a subscription schema. This is a non-blocking way to ensure the server is aware of the subscription metadata, which is required before calling `publish()`.
-- **`app.group(name: str = None)`**:
-  Returns a `CommIPCAppGroup` helper. If a `name` is provided, registrations will be made under that specific load-balanced group.
+- **`app.group(name: str)`**:
+  Returns a `CommIPCAppGroup` helper for the specified load-balanced group.
 
 ### CommIPCAppGroup Reference
 - **`@group.provide(name, parameters, returns)`**:
@@ -201,46 +205,55 @@ CommIPC is the main client interface.
   Returns an async iterator for a grouped stream (load balanced).
 
 ---
-### Example Usage
+### Example Usage (Decoupled API)
  
 ```python
-from comm_ipc.app import CommIPCApp
+from comm_ipc import CommIPCApp, CommIPC
 from comm_ipc.comm_data import CommData
 from pydantic import BaseModel
- 
-# 1. Open a channel
-chan = await client.open("math")
-app = CommIPCApp(chan)
- 
+import asyncio
+
+# 1. Define App at top level (FastAPI-style)
+app = CommIPCApp()
+
 # 2. Define a data model
 class MathParams(BaseModel):
     a: int
     b: int
- 
+
 # 3. Register a provider
 @app.provide("add", parameters=MathParams)
 async def add(cd: CommData):
     return cd.data.a + cd.data.b
- 
+
 # 4. Register a streaming provider (detected automatically)
 @app.provide("counter")
 async def count_up(cd: CommData):
     for i in range(5):
         yield {"count": i}
- 
+
 # 5. Register a group provider
-@app.group.provide("mult")
+@app.group("workers").provide("mult")
 async def mult(cd: CommData):
     return cd.data["a"] * cd.data["b"]
- 
-# 6. Declare and listen to subscriptions
-@app.subscription("updates")
-class UpdateModel(BaseModel):
-    status: str
- 
+
+# 6. Listen to subscriptions
 @app.on("updates")
 async def handle_update(cd: CommData):
-    print(f"System Status: {cd.data.status}")
+    print(f"System Status: {cd.data['status']}")
+
+async def main():
+    client = CommIPC(socket_path="/tmp/comm_ipc.sock")
+    await client.connect()
+    chan = await client.open("math")
+    
+    # 7. Bind and register all handlers
+    await app.register(chan)
+    
+    await client.wait_till_end()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
  
 ---
@@ -280,94 +293,159 @@ async def handle(cd):
 ### Request-Response (RPC)
 
 ```python
+import asyncio
 from pydantic import BaseModel
-from comm_ipc.client import CommIPC
+from comm_ipc import CommIPC, CommData
 
 class MathParams(BaseModel):
     a: int
     b: int
 
-# Provider
-async def add_handler(cd):
-    assert isinstance(cd.data, MathParams)
-    return {"result": cd.data.a + cd.data.b}
+async def main():
+    # 1. Setup client with model support
+    client = CommIPC(return_type="model") 
+    await client.connect()
+    channel = await client.open("math_engine")
 
-# Consumer
-client = CommIPC(return_type="model") # Enables automated model reception
-channel = await client.open("math")
-await channel.add_event("add", add_handler, parameters=MathParams)
+    # 2. Register a provider
+    async def add_handler(cd: CommData):
+        # cd.data is automatically a MathParams instance
+        return {"result": cd.data.a + cd.data.b}
+    
+    await channel.add_event("add", add_handler, parameters=MathParams)
 
-res = await channel.event("add", MathParams(a=10, b=20))
-print(f"Result: {res.data['result']}") # cd.data is automatically a model instance
+    # 3. Call the provider
+    res = await channel.event("add", MathParams(a=10, b=20))
+    print(f"Result: {res.data['result']}") 
+
+    await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### Publisher-Subscriber
 
 ```python
+import asyncio
 from pydantic import BaseModel
+from comm_ipc import CommIPC
 
 class User(BaseModel):
     id: int
     name: str
 
-# Publisher
-await channel.add_subscription("news", model=User)
-await channel.publish("news", User(id=1, name="Alice"))
+async def main():
+    client = CommIPC(return_type="model")
+    await client.connect()
+    channel = await client.open("social")
 
-# Subscriber
-async def on_data(cd):
-    # cd.data is automatically an instance of User (local or dynamic)
-    print(f"Got user: {cd.data.name}") 
+    # 1. Declare and Subscribe
+    async def on_user(cd):
+        # cd.data is automatically an instance of User
+        print(f"New user joined: {cd.data.name}") 
 
-await channel.subscribe("news", on_data)
+    await channel.subscribe("join_events", on_user)
+
+    # 2. Publish
+    # Note: add_subscription is required before publishing to register the schema
+    await channel.add_subscription("join_events", model=User)
+    await channel.publish("join_events", User(id=1, name="Alice"))
+    
+    await asyncio.sleep(0.5) # Give it time to arrive
+    await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### Streaming
 
 ```python
-# Provider
-async def count_up(cd):
-    for i in range(cd.data["limit"]):
-        yield i
+import asyncio
+from comm_ipc import CommIPC
 
-await channel.add_stream("counter", count_up)
+async def main():
+    client = CommIPC()
+    await client.connect()
+    channel = await client.open("streams")
 
-# Consumer
-async for chunk in channel.stream("counter", {"limit": 5}):
-    print(chunk.data)
+    # 1. Provider (Async Generator)
+    async def count_up(cd):
+        for i in range(cd.data["limit"]):
+            yield {"count": i}
+
+    await channel.add_stream("counter", count_up)
+
+    # 2. Consumer
+    async for chunk in channel.stream("counter", {"limit": 5}):
+        print(f"Received: {chunk.data['count']}")
+
+    await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### Messaging and Listeners
 
 ```python
-# Send: Directed message to a provider (no response)
-await channel.send("log", {"level": "info", "msg": "event started"})
+import asyncio
+from comm_ipc import CommIPC
 
-# Broadcast: Message to every client in the channel
-await channel.broadcast("system_update", {"status": "maintenance"})
+async def main():
+    client = CommIPC()
+    await client.connect()
+    channel = await client.open("monitor")
 
-# Listen: specific event
-async def on_update(cd):
-    print(f"Update: {cd.data}")
+    async def on_event(cd):
+        print(f"Message from {cd.sender_id}: {cd.data}")
 
-channel.on_receive(on_update, "system_update")
+    # Listen for specific event
+    channel.on_receive(on_event, "alert")
+    
+    # Broadcast to everyone
+    await channel.broadcast("alert", {"msg": "System going down!"})
+    
+    # Send directed message (no response expected)
+    await channel.send("alert", {"msg": "Individual warning"})
 
-# Listen: generic channel observer
-async def on_any(cd):
-    print(f"Channel {cd.channel} got {cd.event}")
+    await asyncio.sleep(0.1)
+    await client.close()
 
-channel.on_receive(on_any)
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### Security and Passwords
 
 ```python
-# Set password (owner)
-channel = await client.open("secure")
-await client.set_password("secure", "password123")
+import asyncio
+from comm_ipc import CommIPC
 
-# Open with password (client)
-channel = await client.open("secure", password="password123")
+async def main():
+    client = CommIPC()
+    await client.connect()
+
+    # 1. Open and set password (Owner)
+    channel = await client.open("secure_vault")
+    await client.set_password("secure_vault", "secret123")
+    
+    # 2. Open with password (Member)
+    # This would typically be in a separate process
+    client2 = CommIPC(client_id="guest")
+    await client2.connect()
+    try:
+        chan2 = await client2.open("secure_vault", password="secret123")
+        print("Successfully accessed vault!")
+    except Exception as e:
+        print(f"Access denied: {e}")
+
+    await client2.close()
+    await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ---
@@ -427,6 +505,29 @@ The server provides read-only channels for monitoring:
 - `__comm_ipc_logs`: Server log broadcast.
 - `__comm_ipc_errors`: Global error broadcast.
 - `__comm_ipc_system`: System event broadcast (e.g., `new_registration`).
+
+## Running Examples & Demos
+
+The repository includes a comprehensive `examples/` directory demonstrating various communication patterns.
+
+### Quick Start: All Demos
+To run the full integration suite and verify your installation:
+```bash
+chmod +x examples/run_demos.sh
+./examples/run_demos.sh
+```
+
+### Manual Examples
+You can run individual examples by starting the server first:
+1. **Start Server**: `python examples/server.py`
+2. **Start Provider**: `python examples/rpc_prov.py`
+3. **Run Client**: `python examples/rpc_client.py`
+
+Other examples include:
+- `decorator_prov.py` / `decorator_client.py`: Modern decoupled API.
+- `pub_prov.py` / `sub_client.py`: Publish/Subscribe pattern.
+- `stream_prov.py` / `stream_client.py`: Async streaming.
+- `decoupled_demo.py`: "FastAPI-style" top-level application structure.
 
 ## Resilience
 
