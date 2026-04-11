@@ -46,6 +46,16 @@ async def profile_handler(cd: CommData):
     return {"user_id": uid, "username": f"user_{uid}_ipc"}
 
 
+@home_app.provide("ping")
+async def ping_handler(cd: CommData):
+    return {"status": "pong"}
+
+@user_app.provide("echo")
+async def echo_handler(cd: CommData):
+    return {"echo": cd.data}
+
+
+
 async def run_example():
     server = CommIPCServer(verbose=True)
     server_task = asyncio.create_task(server.run())
