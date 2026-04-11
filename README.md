@@ -4,11 +4,14 @@
 
 ```bash
 pip install comm-ipc
+
+# Or with FastAPI support
+pip install "comm-ipc[fastapi]"
 ```
 
 ## Why CommIPC?
 
-CommIPC bridges the gap between simple Unix sockets and complex message brokers like RabbitMQ. It gives you Type-Safe, Asynchronous communication with the ease of a local function call.
+CommIPC bridges the gap between simple Unix sockets and complex message brokers like RabbitMQ. It gives you Type-Safe, Asynchronous communication with the ease of a local function call, and now includes seamless **FastAPI Integration**.
 
 ---
 
@@ -60,6 +63,7 @@ CommIPC supports several transport layers:
 - **Local**: Unix Domain Sockets.
 - **Remote**: TCP connections.
 - **Secure**: SSL/TLS encryption for TCP.
+- **Gateway**: Dynamic FastAPI integration for REST/SSE.
 
 ### Initialization
 
@@ -448,8 +452,44 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
----
+### FastAPI Integration
 
+```python
+from fastapi import FastAPI
+from comm_ipc import CommIPC
+from comm_ipc.api import CommAPI
+
+app = FastAPI()
+client = CommIPC()
+
+@app.on_event("startup")
+async def startup():
+    await client.connect()
+    # Expose IPC events as REST endpoints
+    api = CommAPI(app, client)
+    api.add_event("math_engine", "add", path="/add", method="POST")
+
+# Now accessible via POST /add
+```
+
+---
+ 
+ ## System Reference: CommAPI
+ 
+ `CommAPI` bridges `CommIPC` with `FastAPI`, enabling you to expose IPC events as REST/SSE endpoints.
+ 
+ ### Constructor: `CommAPI`
+ - `app` (`FastAPI`): Your FastAPI application instance.
+ - `client` (`CommIPC`): A connected CommIPC client.
+ 
+ ### Methods
+ - **`add_event(channel, event_name, path, method, tags)`**: 
+   Exposes a specific IPC event at the given path. Automatically generates Pydantic models for request/response validation based on the IPC schema.
+ - **`add_resource(channel, path_template, tags, method)`**: 
+   Mounts all discovered events of a channel based on a template (e.g., `/{event}`).
+ 
+ ---
+ 
 ## System Reference: CommData (Message Object)
 
 `CommData` models all messages and metadata.
@@ -528,6 +568,7 @@ Other examples include:
 - `pub_prov.py` / `sub_client.py`: Publish/Subscribe pattern.
 - `stream_prov.py` / `stream_client.py`: Async streaming.
 - `decoupled_demo.py`: "FastAPI-style" top-level application structure.
+- `fastapi_integration.py`: Full REST/SSE bridge using `CommAPI`.
 
 ## Resilience
 
