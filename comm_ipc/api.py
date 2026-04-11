@@ -1,16 +1,27 @@
 import json
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
 
-from fastapi import FastAPI, Body, Request, HTTPException
-from fastapi.responses import StreamingResponse
+try:
+    from fastapi import FastAPI, Body, Request, HTTPException
+    from fastapi.responses import StreamingResponse
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+    if TYPE_CHECKING:
+        from fastapi import FastAPI, Body, Request, HTTPException
+        from fastapi.responses import StreamingResponse
 
 from comm_ipc.channel import CommIPCChannel
 from comm_ipc.client import CommIPC
 from comm_ipc.comm_data import CommData
 
-
 class CommAPI:
-    def __init__(self, app: FastAPI, client: CommIPC):
+    def __init__(self, app: "FastAPI", client: CommIPC):
+        if not HAS_FASTAPI:
+            raise RuntimeError(
+                "FastAPI is required to use CommAPI. "
+                "Install it with: pip install 'comm-ipc[fastapi]'"
+            )
         self.app = app
         self.client = client
         self.mounted_channels: List[str] = []
