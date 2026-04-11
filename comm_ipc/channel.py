@@ -330,6 +330,8 @@ class CommIPCChannel:
         if name in self.events:
             return {
                 "type": "event",
+                "is_stream": self.events[name]["is_stream"],
+                "is_group": self.events[name]["is_group"],
                 "parameters": self.events[name]["param_schema"],
                 "returns": self.events[name]["return_schema"]
             }
@@ -339,7 +341,10 @@ class CommIPCChannel:
                 "returns": self.subscriptions[name]["return_schema"]
             }
         if name in self.remote_schemas:
-            return self.remote_schemas[name]
+            res = self.remote_schemas[name].copy()
+            if "stype" in res:
+                res["type"] = res.pop("stype")
+            return res
         return None
 
     async def handle_receive(self, comm_data: CommData):

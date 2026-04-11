@@ -79,6 +79,15 @@ else
     FAILED=1
 fi
 
+echo -e "\n>>> Testing FastAPI Integration..."
+python examples/fastapi_integration.py
+if [ $? -eq 0 ]; then
+    echo "✅ FastAPI Integration PASSED"
+else
+    echo "❌ FastAPI Integration FAILED"
+    FAILED=1
+fi
+
 if [ $FAILED -eq 0 ]; then
     echo -e "\n🎉 ALL DEMOS PASSED SUCCESSFULLY!"
 else

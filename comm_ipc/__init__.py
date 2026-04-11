@@ -6,6 +6,7 @@ from .client import CommIPC
 from .server import CommIPCServer
 from .bridge import CommIPCBridge
 from .app import CommIPCApp
+from .api import CommAPI
 
 __all__ = [
     "security",
@@ -19,4 +20,5 @@ __all__ = [
     "CommIPCServer",
     "CommIPCBridge",
     "CommIPCApp",
+    "CommAPI",
 ]

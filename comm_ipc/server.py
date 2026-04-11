@@ -388,6 +388,7 @@ class CommIPCServer:
             self.event_schemas[chan_name][event] = {
                 "param_schema": reg.get("param_schema"),
                 "return_schema": reg.get("return_schema"),
+                "is_stream": is_stream,
                 "is_group": is_group
             }
 
@@ -397,6 +398,8 @@ class CommIPCServer:
                 "name": event,
                 "stype": "event",
                 "owner": client_id,
+                "is_stream": is_stream,
+                "is_group": is_group,
                 "param_schema": reg.get("param_schema"),
                 "return_schema": reg.get("return_schema")
             }, exclude_client=client_id)
@@ -421,6 +424,8 @@ class CommIPCServer:
                     schemas = self.event_schemas.get(chan_name, {}).get(ev, {})
                     events[ev] = {
                         "owner": pids[0] if pids else None,
+                        "is_stream": schemas.get("is_stream", False),
+                        "is_group": schemas.get("is_group", False),
                         "param_schema": schemas.get("param_schema"),
                         "return_schema": schemas.get("return_schema"),
                         "stype": "event"

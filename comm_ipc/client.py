@@ -252,6 +252,7 @@ class CommIPC:
                         h = hinfo["call"] if hinfo else None
                         if h:
                             if inspect.isasyncgenfunction(h):
+                                i_cd.data = chan.validate_data(i_cd.data, hinfo["parameters"])
                                 async for chunk in h(i_cd):
                                     resp = CommData(
                                         sender_id=self.client_id,
