@@ -3,8 +3,8 @@ import time
 import multiprocessing
 from benchmark.utils import BenchmarkRunner, calculate_stats
 
-async def run_group_benchmark(num_calls=10000):
-    runner = BenchmarkRunner()
+async def run_group_benchmark(num_calls=10000, transport_params=None):
+    runner = BenchmarkRunner(**(transport_params or {}))
     await runner.start_server()
     
     # Spawn 2 Providers in separate processes

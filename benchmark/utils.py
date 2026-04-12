@@ -14,14 +14,14 @@ try:
 except ImportError:
     uvloop = None
 
-def _run_server_proc(socket_path, verbose=False):
+def _run_server_proc(socket_path=None, host=None, port=None, verbose=False):
     """Entry point for the server process."""
     if uvloop:
         uvloop.install()
     server = CommIPCServer(verbose=verbose)
-    asyncio.run(server.run(socket_path=socket_path))
+    asyncio.run(server.run(socket_path=socket_path, host=host, port=port))
 
-def _run_provider_proc(socket_path, channel_name, event_name, ready_event, is_group=False):
+def _run_provider_proc(socket_path, host, port, channel_name, event_name, ready_event, is_group=False):
     """Simple echo provider in its own process."""
     if uvloop:
         uvloop.install()
@@ -29,7 +29,7 @@ def _run_provider_proc(socket_path, channel_name, event_name, ready_event, is_gr
     async def run():
         try:
             client = CommIPC(socket_path=socket_path, verbose=False)
-            await client.connect()
+            await client.connect(host=host, port=port)
             chan = await client.open(channel_name)
 
             async def echo_handler(cd):
@@ -45,14 +45,14 @@ def _run_provider_proc(socket_path, channel_name, event_name, ready_event, is_gr
 
     asyncio.run(run())
 
-def _run_subscriber_proc(socket_path, channel_name, results_queue, num_msgs, ready_event):
+def _run_subscriber_proc(socket_path, host, port, channel_name, results_queue, num_msgs, ready_event):
     """Subscriber that collects timestamps and pushes to a queue."""
     if uvloop:
         uvloop.install()
 
     async def run():
         client = CommIPC(socket_path=socket_path, verbose=False)
-        await client.connect()
+        await client.connect(host=host, port=port)
         chan = await client.open(channel_name)
         
         latencies = []
@@ -83,34 +83,40 @@ def _run_subscriber_proc(socket_path, channel_name, results_queue, num_msgs, rea
     asyncio.run(run())
 
 class BenchmarkRunner:
-    def __init__(self, socket_path=None):
-        self.socket_path = socket_path or f"/tmp/bench_{uuid.uuid4().hex[:8]}.sock"
+    def __init__(self, socket_path=None, host=None, port=None):
+        self.socket_path = socket_path or (None if host else f"/tmp/bench_{uuid.uuid4().hex[:8]}.sock")
+        self.host = host
+        self.port = port
         self.server_proc = None
         self.child_procs = []
 
     async def start_server(self, verbose=False):
-        if os.path.exists(self.socket_path):
+        if self.socket_path and os.path.exists(self.socket_path):
             os.remove(self.socket_path)
         
         self.server_proc = multiprocessing.Process(
             target=_run_server_proc, 
-            args=(self.socket_path, verbose)
+            args=(self.socket_path, self.host, self.port, verbose)
         )
         self.server_proc.start()
         
         count = 0
-        while not os.path.exists(self.socket_path) and count < 100:
-            await asyncio.sleep(0.1)
-            count += 1
-            
-        if not os.path.exists(self.socket_path):
-             raise Exception("Server process failed to create socket in time")
+        if self.socket_path:
+            while not os.path.exists(self.socket_path) and count < 100:
+                await asyncio.sleep(0.1)
+                count += 1
+                
+            if not os.path.exists(self.socket_path):
+                 raise Exception("Server process failed to create socket in time")
+        else:
+            # For TCP, just give it a moment
+            await asyncio.sleep(1.0)
 
     async def spawn_provider(self, channel, event, is_group=False):
         ready_event = multiprocessing.Event()
         proc = multiprocessing.Process(
             target=_run_provider_proc,
-            args=(self.socket_path, channel, event, ready_event, is_group)
+            args=(self.socket_path, self.host, self.port, channel, event, ready_event, is_group)
         )
         proc.start()
         self.child_procs.append(proc)
@@ -131,7 +137,7 @@ class BenchmarkRunner:
         ready_event = multiprocessing.Event()
         proc = multiprocessing.Process(
             target=_run_subscriber_proc,
-            args=(self.socket_path, channel, queue, num_msgs, ready_event)
+            args=(self.socket_path, self.host, self.port, channel, queue, num_msgs, ready_event)
         )
         proc.start()
         self.child_procs.append(proc)
@@ -159,7 +165,7 @@ class BenchmarkRunner:
                 self.server_proc.kill()
             self.server_proc = None
             
-        if os.path.exists(self.socket_path):
+        if self.socket_path and os.path.exists(self.socket_path):
             try:
                 os.remove(self.socket_path)
             except OSError:
@@ -167,7 +173,7 @@ class BenchmarkRunner:
 
     async def get_client(self, return_type="dict"):
         client = CommIPC(socket_path=self.socket_path, return_type=return_type, verbose=False)
-        await client.connect()
+        await client.connect(host=self.host, port=self.port)
         return client
 
 def calculate_stats(latencies):

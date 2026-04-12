@@ -4,13 +4,13 @@ import multiprocessing
 from benchmark.utils import BenchmarkRunner, calculate_stats, uvloop
 from comm_ipc.client import CommIPC
 
-def _run_stream_provider_proc(socket_path, ready_event):
+def _run_stream_provider_proc(socket_path, host, port, ready_event):
     if uvloop:
         uvloop.install()
 
     async def run():
         client = CommIPC(socket_path=socket_path, verbose=False)
-        await client.connect()
+        await client.connect(host=host, port=port)
         chan = await client.open("bench_stream")
 
         async def stream_handler(cd):
@@ -27,15 +27,15 @@ def _run_stream_provider_proc(socket_path, ready_event):
 # Since the previous helper was generic, we might need a custom one for streaming
 # or update utils.py. Let's just define it here for now.
 
-async def run_stream_benchmark(num_chunks=50000):
-    runner = BenchmarkRunner()
+async def run_stream_benchmark(num_chunks=50000, transport_params=None):
+    runner = BenchmarkRunner(**(transport_params or {}))
     await runner.start_server()
     
     # Custom provider for streaming
     ready_event = multiprocessing.Event()
     proc = multiprocessing.Process(
         target=_run_stream_provider_proc,
-        args=(runner.socket_path, ready_event)
+        args=(runner.socket_path, runner.host, runner.port, ready_event)
     )
     proc.start()
     runner.child_procs.append(proc)

@@ -2,8 +2,8 @@ import asyncio
 import time
 from benchmark.utils import BenchmarkRunner, calculate_stats
 
-async def run_pubsub_benchmark(num_msgs=5000):
-    runner = BenchmarkRunner()
+async def run_pubsub_benchmark(num_msgs=5000, transport_params=None):
+    runner = BenchmarkRunner(**(transport_params or {}))
     await runner.start_server()
     
     # Spawn Subscriber in separate process

@@ -2,8 +2,8 @@ import asyncio
 import time
 from benchmark.utils import BenchmarkRunner, calculate_stats
 
-async def run_rpc_benchmark(num_calls=10000):
-    runner = BenchmarkRunner()
+async def run_rpc_benchmark(num_calls=10000, transport_params=None):
+    runner = BenchmarkRunner(**(transport_params or {}))
     await runner.start_server()
     
     # Spawn Provider in separate process
