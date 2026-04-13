@@ -14,12 +14,14 @@ try:
 except ImportError:
     uvloop = None
 
+
 def _run_server_proc(socket_path=None, host=None, port=None, verbose=False):
     """Entry point for the server process."""
     if uvloop:
         uvloop.install()
     server = CommIPCServer(verbose=verbose)
     asyncio.run(server.run(socket_path=socket_path, host=host, port=port))
+
 
 def _run_provider_proc(socket_path, host, port, channel_name, event_name, ready_event, is_group=False):
     """Simple echo provider in its own process."""
@@ -45,6 +47,7 @@ def _run_provider_proc(socket_path, host, port, channel_name, event_name, ready_
 
     asyncio.run(run())
 
+
 def _run_subscriber_proc(socket_path, host, port, channel_name, results_queue, num_msgs, ready_event):
     """Subscriber that collects timestamps and pushes to a queue."""
     if uvloop:
@@ -54,7 +57,7 @@ def _run_subscriber_proc(socket_path, host, port, channel_name, results_queue, n
         client = CommIPC(socket_path=socket_path, verbose=False)
         await client.connect(host=host, port=port)
         chan = await client.open(channel_name)
-        
+
         latencies = []
         received_count = 0
         done_event = asyncio.Event()
@@ -65,22 +68,23 @@ def _run_subscriber_proc(socket_path, host, port, channel_name, results_queue, n
             sent_time = cd.data.get("t")
             if sent_time:
                 latencies.append(time.perf_counter() - sent_time)
-            
+
             if received_count >= num_msgs:
                 done_event.set()
 
         await chan.subscribe("topic", sub_handler)
         ready_event.set()
-        
+
         try:
             await asyncio.wait_for(done_event.wait(), timeout=30)
         except asyncio.TimeoutError:
             pass
-            
+
         results_queue.put(latencies)
         await client.close()
 
     asyncio.run(run())
+
 
 class BenchmarkRunner:
     def __init__(self, socket_path=None, host=None, port=None):
@@ -93,21 +97,21 @@ class BenchmarkRunner:
     async def start_server(self, verbose=False):
         if self.socket_path and os.path.exists(self.socket_path):
             os.remove(self.socket_path)
-        
+
         self.server_proc = multiprocessing.Process(
-            target=_run_server_proc, 
+            target=_run_server_proc,
             args=(self.socket_path, self.host, self.port, verbose)
         )
         self.server_proc.start()
-        
+
         count = 0
         if self.socket_path:
             while not os.path.exists(self.socket_path) and count < 100:
                 await asyncio.sleep(0.1)
                 count += 1
-                
+
             if not os.path.exists(self.socket_path):
-                 raise Exception("Server process failed to create socket in time")
+                raise Exception("Server process failed to create socket in time")
         else:
             # For TCP, just give it a moment
             await asyncio.sleep(1.0)
@@ -120,7 +124,7 @@ class BenchmarkRunner:
         )
         proc.start()
         self.child_procs.append(proc)
-        
+
         # Wait for provider to register
         count = 0
         while not ready_event.is_set() and count < 100:
@@ -141,13 +145,13 @@ class BenchmarkRunner:
         )
         proc.start()
         self.child_procs.append(proc)
-        
+
         # Wait for subscriber to be ready
         count = 0
         while not ready_event.is_set() and count < 100:
             await asyncio.sleep(0.1)
             count += 1
-            
+
         return queue
 
     async def stop_all(self):
@@ -164,7 +168,7 @@ class BenchmarkRunner:
             if self.server_proc.is_alive():
                 self.server_proc.kill()
             self.server_proc = None
-            
+
         if self.socket_path and os.path.exists(self.socket_path):
             try:
                 os.remove(self.socket_path)
@@ -176,12 +180,13 @@ class BenchmarkRunner:
         await client.connect(host=self.host, port=self.port)
         return client
 
+
 def calculate_stats(latencies):
     if not latencies:
         return {}
     return {
-        "mean": statistics.mean(latencies) * 1000, 
-        "median": statistics.median(latencies) * 1000, 
+        "mean": statistics.mean(latencies) * 1000,
+        "median": statistics.median(latencies) * 1000,
         "p95": sorted(latencies)[int(len(latencies) * 0.95)] * 1000 if len(latencies) >= 20 else 0,
         "p99": sorted(latencies)[int(len(latencies) * 0.99)] * 1000 if len(latencies) >= 100 else 0,
         "min": min(latencies) * 1000,

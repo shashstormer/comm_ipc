@@ -1,8 +1,8 @@
 import asyncio
-from benchmark.bench_rpc import run_rpc_benchmark
-from benchmark.bench_pubsub import run_pubsub_benchmark
-from benchmark.bench_stream import run_stream_benchmark
-from benchmark.bench_group import run_group_benchmark
+from bench_rpc import run_rpc_benchmark
+from bench_pubsub import run_pubsub_benchmark
+from bench_stream import run_stream_benchmark
+from bench_group import run_group_benchmark
 
 async def main():
     try:
