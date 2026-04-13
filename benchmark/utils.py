@@ -1,13 +1,12 @@
 import asyncio
-import os
-import time
-import statistics
-import uuid
 import multiprocessing
-import msgpack
-import struct
-from comm_ipc.server import CommIPCServer
+import os
+import statistics
+import time
+import uuid
+from typing import Literal
 from comm_ipc.client import CommIPC
+from comm_ipc.server import CommIPCServer
 
 try:
     import uvloop
@@ -175,7 +174,7 @@ class BenchmarkRunner:
             except OSError:
                 pass
 
-    async def get_client(self, return_type="dict"):
+    async def get_client(self, return_type: Literal["dict"] = "dict"):
         client = CommIPC(socket_path=self.socket_path, return_type=return_type, verbose=False)
         await client.connect(host=self.host, port=self.port)
         return client
