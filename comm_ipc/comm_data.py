@@ -19,6 +19,7 @@ class CommData(BaseModel):
     signature: Optional[str] = None
     origin_server_id: Optional[str] = None
     sub_name: Optional[str] = None
+    mode: str = "client"
 
     @field_validator('sender_id', 'server_id', 'channel', 'event', mode='before')
     @classmethod

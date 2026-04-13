@@ -22,6 +22,7 @@ class CommIPCServer:
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
                  lb_policy: Literal["round-robin", "least-active"] = "least-active",
                  verbose: bool = False):
+        self._server = None
         self.running = None
         self.server_id = server_id or f"srv-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
@@ -49,6 +50,10 @@ class CommIPCServer:
         self.sub_owners: Dict[str, Dict[str, str]] = {}
         self.sub_params: Dict[str, Dict[str, Any]] = {}
         self.event_schemas: Dict[str, Dict[str, Any]] = {}
+        self.client_modes: Dict[str, str] = {}
+        self.remote_routes: Dict[str, Dict[str, Any]] = {} # rid -> {"bridge": bridge_id, "path": List[str]}
+        self.remote_channel_members: Dict[str, Set[str]] = {}
+        self._server = None
 
     def _log(self, message: str, level: str = "info", client_id: str = None):
         log_msg = f"[SERVER {self.server_id}] {message}"
@@ -141,6 +146,7 @@ class CommIPCServer:
 
                     self._log(f"Client {client_id} identified", client_id=client_id)
                 self.clients[client_id] = writer
+                self.client_modes[client_id] = ident.get("mode", "client")
 
             while True:
                 try:
@@ -174,6 +180,16 @@ class CommIPCServer:
                     if client_id in self.channel_members[channel]:
                         is_owner = (self.channel_members[channel][0] == client_id)
                         self.channel_members[channel].remove(client_id)
+
+                        await self._broadcast_to_channel(channel, {
+                            "type": "metadata_update",
+                            "channel": channel,
+                            "name": client_id,
+                            "stype": "membership",
+                            "owner": client_id,
+                            "mode": self.client_modes.get(client_id, "client"),
+                            "action": "leave"
+                        })
 
                         if is_owner and self.channel_policy == "terminate":
                             remaining = list(self.channel_members[channel])
@@ -265,6 +281,12 @@ class CommIPCServer:
             await self._handle_unsubscribe(client_id, msg)
         elif mtype == "publish":
             await self._handle_publish(client_id, msg)
+        elif mtype == "list_members":
+            await self._handle_list_members(client_id, msg)
+        elif mtype == "announce_remote":
+            await self._handle_announce_remote(client_id, msg)
+        elif mtype == "forget_remote":
+            await self._handle_forget_remote(client_id, msg)
 
     async def _handle_register(self, client_id: str, reg: Dict):
         chan_name = reg.get("channel")
@@ -446,6 +468,16 @@ class CommIPCServer:
                 "events": events,
                 "subscriptions": subs
             })
+
+        await self._broadcast_to_channel(chan_name, {
+            "type": "metadata_update",
+            "channel": chan_name,
+            "name": client_id,
+            "stype": "membership",
+            "owner": client_id,
+            "mode": self.client_modes.get(client_id, "client"),
+            "action": "join"
+        }, exclude_client=client_id)
 
         await self._system_broadcast("__comm_ipc_system", {
             "type": "receive",
@@ -635,6 +667,12 @@ class CommIPCServer:
         if client_id in self.clients:
             writer = self.clients[client_id]
             asyncio.create_task(self._send_to_writer(writer, msg))
+        elif client_id in self.remote_routes:
+            bridge_id = self.remote_routes[client_id]["bridge"]
+            if bridge_id in self.clients:
+                msg["target_id"] = client_id
+                writer = self.clients[bridge_id]
+                asyncio.create_task(self._send_to_writer(writer, msg))
 
     async def _send_to_writer(self, writer: asyncio.StreamWriter, msg: Any):
         if writer not in self._writer_locks:
@@ -684,35 +722,159 @@ class CommIPCServer:
         finally:
             self._reporting_error = False
 
+
+    async def _handle_list_members(self, client_id: str, msg: Dict):
+        chan = msg.get("channel")
+        rid = msg.get("request_id")
+        members = []
+        if chan in self.channel_members:
+            for mid in self.channel_members[chan]:
+                members.append({
+                    "id": mid,
+                    "mode": self.client_modes.get(mid, "client"),
+                    "is_local": True,
+                    "path": []
+                })
+        
+        if chan in self.remote_channel_members:
+            for mid in self.remote_channel_members[chan]:
+                members.append({
+                    "id": mid,
+                    "mode": self.client_modes.get(mid, "client"),
+                    "is_local": False,
+                    "bridge_id": self.remote_routes.get(mid, {}).get("bridge"),
+                    "path": self.remote_routes.get(mid, {}).get("path", [])
+                })
+        
+        await self._send_to_client(client_id, {
+            "type": "response",
+            "request_id": rid,
+            "data": {"members": members}
+        })
+
+    async def _handle_announce_remote(self, bridge_id: str, msg: Dict):
+        if self.client_modes.get(bridge_id) != "bridge":
+            return
+        
+        remote_clients = msg.get("clients", [])
+        channel = msg.get("channel")
+
+        for entry in remote_clients:
+            if isinstance(entry, dict):
+                rid = entry["id"]
+                rmode = entry.get("mode", "client")
+                rpath = entry.get("path", [])
+            else:
+                rid = entry
+                rmode = "client"
+                rpath = []
+            
+            if self.server_id in rpath:
+                continue
+
+            if rid in self.remote_routes:
+                old_path = self.remote_routes[rid].get("path", [])
+                if len(rpath) >= len(old_path) and len(old_path) > 0:
+                    continue
+
+            self.remote_routes[rid] = {
+                "bridge": bridge_id,
+                "path": rpath
+            }
+            self.client_modes[rid] = rmode
+            
+            if channel:
+                if channel not in self.remote_channel_members:
+                    self.remote_channel_members[channel] = set()
+                self.remote_channel_members[channel].add(rid)
+                
+                await self._broadcast_to_channel(channel, {
+                    "type": "metadata_update",
+                    "stype": "membership",
+                    "action": "join",
+                    "owner": rid,
+                    "mode": rmode,
+                    "channel": channel,
+                    "is_local": False,
+                    "path": rpath
+                })
+            
+    async def _handle_forget_remote(self, bridge_id: str, msg: Dict):
+        if self.client_modes.get(bridge_id) != "bridge":
+            return
+        
+        rid = msg.get("id")
+        channel = msg.get("channel")
+        
+        if not rid:
+            return
+
+        if rid in self.remote_routes and self.remote_routes[rid].get("bridge") != bridge_id:
+            return
+
+        if rid in self.remote_routes:
+            del self.remote_routes[rid]
+        if rid in self.client_modes:
+            del self.client_modes[rid]
+            
+        affected_channels = [channel] if channel else list(self.remote_channel_members.keys())
+        for chan in affected_channels:
+            if chan in self.remote_channel_members and rid in self.remote_channel_members[chan]:
+                self.remote_channel_members[chan].remove(rid)
+                await self._broadcast_to_channel(chan, {
+                    "type": "metadata_update",
+                    "stype": "membership",
+                    "action": "leave",
+                    "owner": rid,
+                    "channel": chan,
+                    "is_local": False
+                })
     async def run(self, socket_path: str = None, host: str = None, port: int = None, ssl_context=None):
         if socket_path:
             self.socket_path = socket_path
 
-        server = None
+        self.running = True
         try:
             if host and port:
-                server = await asyncio.start_server(self.handle_client, host, port, ssl=ssl_context)
+                self._server = await asyncio.start_server(self.handle_client, host, port, ssl=ssl_context)
+                self._log(f"Server started on {host}:{port}")
             else:
                 if os.path.exists(self.socket_path):
                     os.remove(self.socket_path)
-                server = await asyncio.start_unix_server(self.handle_client, self.socket_path)
+                self._server = await asyncio.start_unix_server(self.handle_client, self.socket_path)
+                self._log(f"Server started on UNIX socket {self.socket_path}")
 
-            async with server:
-                await server.serve_forever()
+            self._cleanup_task = asyncio.create_task(self._prune_challenges())
+            
+            async with self._server:
+                await self._server.serve_forever()
         except asyncio.CancelledError:
             pass
         finally:
-            if server:
-                server.close()
-                for w in list(self.active_writers):
-                    try:
-                        w.close()
-                        await asyncio.wait_for(w.wait_closed(), timeout=1.0)
-                    except:
-                        pass
-                await asyncio.wait_for(server.wait_closed(), timeout=2.0)
-            if self._cleanup_task:
-                self._cleanup_task.cancel()
+            await self.stop()
+
+    async def stop(self):
+        self.running = False
+        if self._server:
+            self._server.close()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), timeout=2.0)
+            except: pass
+            self._server = None
+
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try: await self._cleanup_task
+            except: pass
+            self._cleanup_task = None
+
+        for w in list(self.active_writers):
+            try:
+                w.close()
+                await asyncio.wait_for(w.wait_closed(), timeout=1.0)
+            except: pass
+        self.active_writers.clear()
+        self.clients.clear()
 
     async def _handle_add_subscription(self, client_id: str, msg: Dict):
         chan = msg.get("channel")
@@ -861,19 +1023,3 @@ class CommIPCServer:
             }
             for sub_id in list(self.subscribers[chan][sub_name]):
                 await self._send_to_client(sub_id, pub_msg)
-
-    async def stop(self):
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-
-        for w in list(self.active_writers):
-            try:
-                w.close()
-                await w.wait_closed()
-            except:
-                pass
-        self.active_writers.clear()

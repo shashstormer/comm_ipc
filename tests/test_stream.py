@@ -81,7 +81,8 @@ class TestStreamIPC(unittest.IsolatedAsyncioTestCase):
             srv_a, task_a = await start_test_server(server_id="server-a", socket_path=socket_a)
             srv_b, task_b = await start_test_server(server_id="server-b", socket_path=socket_b)
 
-            bridge = CommIPCBridge(bridge_id="bridge-ab", socket_path1=socket_a, socket_path2=socket_b)
+            bridge = CommIPCBridge(bridge_id="bridge-ab", socket_path1=socket_a, socket_path2=socket_b, 
+                                   allowed_channels=["cross_stream"])
             await bridge.connect({}, {})
 
             p_a = CommIPC(client_id="p-a", socket_path=socket_a)

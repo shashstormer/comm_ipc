@@ -105,10 +105,11 @@ class TestZeroTrust(unittest.IsolatedAsyncioTestCase):
         
         await asyncio.sleep(0.2)
         
-        self.assertIn("allowed", bridge.synced_channels["c1"])
-        self.assertIn("allowed", bridge.synced_channels["c2"])
+        self.assertIn("allowed", bridge.c1.channels.keys())
+        self.assertIn("allowed", bridge.c2.channels.keys())
         
-        self.assertNotIn("forbidden", bridge.synced_channels["c1"])
+        self.assertNotIn("forbidden", bridge.c1.channels.keys())
+        self.assertNotIn("forbidden", bridge.c2.channels.keys())
         
         await bridge.stop()
         await stop_test_server(s1, s1_task)

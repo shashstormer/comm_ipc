@@ -253,6 +253,9 @@ class CommIPCChannel:
     async def unsubscribe(self, sub_name: str):
         return await self.parent.unsubscribe(self.name, sub_name)
 
+    async def list_members(self):
+        return await self.parent.list_members(self.name)
+
     async def publish(self, sub_name: str, data: Any):
         if sub_name in self.subscriptions:
             data = self.validate_data(data, self.subscriptions[sub_name].get("model"))

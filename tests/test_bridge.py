@@ -15,7 +15,8 @@ class TestBridgeIPC(unittest.IsolatedAsyncioTestCase):
         self.srv_a, self.task_a = await start_test_server(server_id="server-a", socket_path=self.socket_a)
         self.srv_b, self.task_b = await start_test_server(server_id="server-b", socket_path=self.socket_b)
 
-        self.bridge = CommIPCBridge(bridge_id="bridge-ab", socket_path1=self.socket_a, socket_path2=self.socket_b)
+        self.bridge = CommIPCBridge(bridge_id="bridge-ab", socket_path1=self.socket_a, socket_path2=self.socket_b, 
+                                   allowed_channels=["cross", "sys", "ch"])
         await self.bridge.connect({}, {})
 
     async def asyncTearDown(self):
@@ -27,8 +28,14 @@ class TestBridgeIPC(unittest.IsolatedAsyncioTestCase):
                 os.remove(p)
 
     async def test_bridge_edge_cases(self):
-        d1 = CommData(sender_id="s", server_id="srv", channel="sys", event="ping", data={})
-        await self.bridge._handle_system_event(d1, "c1", "c2")
+        d1 = {
+            "channel": "sys",
+            "stype": "event",
+            "name": "ping",
+            "owner": "s",
+            "is_local": True
+        }
+        await self.bridge._process_metadata(d1, self.bridge.c1, self.bridge.c2, "c1", "c2")
 
         c1 = CommIPC(client_id="s1", socket_path=self.socket_a)
         c2 = CommIPC(client_id="s2", socket_path=self.socket_b)

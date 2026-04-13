@@ -21,6 +21,7 @@ class CommIPC:
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
                  heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
                  return_type: Literal["dict", "model"] = "dict",
+                 mode: str = "client",
                  verbose: bool = False):
         self.client_id = client_id or f"cli-{uuid.uuid4().hex[:8]}"
         self.socket_path = socket_path
@@ -34,6 +35,7 @@ class CommIPC:
         self.data_timeout = data_timeout
         self.heartbeat_interval = heartbeat_interval
         self.return_type = return_type
+        self.mode = mode
         self._is_closing = False
         self._reconnect_count = 0
         self.server_id: Optional[str] = None
@@ -46,6 +48,7 @@ class CommIPC:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()
         self.on_msg: Optional[Callable[[Dict], Any]] = None
+        self.on_metadata: Optional[Callable[[Dict], Any]] = None
         self._host = None
         self._port = None
         self._send_lock = asyncio.Lock()
@@ -78,7 +81,7 @@ class CommIPC:
         self._log("Connecting to server...")
         try:
             async with self._send_lock:
-                await self._send_to_socket_unlocked({"type": "identify", "client_id": self.client_id})
+                await self._send_to_socket_unlocked({"type": "identify", "client_id": self.client_id, "mode": self.mode})
 
             try:
                 len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
@@ -322,12 +325,20 @@ class CommIPC:
                 chan = self.channels[chan_name]
                 name = msg.get("name")
                 stype = msg.get("stype")
-                chan.remote_schemas[name] = {
-                    "owner": msg.get("owner"),
-                    "param_schema": msg.get("param_schema"),
-                    "return_schema": msg.get("return_schema"),
-                    "stype": stype
-                }
+                if name and stype != "membership":
+                    chan.remote_schemas[name] = {
+                        "owner": msg.get("owner"),
+                        "param_schema": msg.get("param_schema"),
+                        "return_schema": msg.get("return_schema"),
+                        "stype": stype
+                    }
+            if self.on_metadata:
+                if inspect.iscoroutinefunction(self.on_metadata) or inspect.iscoroutine(self.on_metadata):
+                     asyncio.create_task(self.on_metadata(msg))
+                else:
+                     res = self.on_metadata(msg)
+                     if inspect.iscoroutine(res):
+                         asyncio.create_task(res)
 
         elif mtype in ("broadcast", "send", "receive"):
             chan_name = msg.get("channel")
@@ -449,6 +460,19 @@ class CommIPC:
             "sub_name": sub_name,
             "data": data
         })
+
+    async def list_members(self, chan: str):
+        if not self._ready.is_set():
+            await self.connect()
+        rid = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_calls[rid] = fut
+        await self.send_msg({
+            "type": "list_members",
+            "channel": chan,
+            "request_id": rid
+        })
+        return await fut
 
     async def send_msg(self, msg: Dict):
         if "data" in msg and isinstance(msg["data"], BaseModel):
