@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comm-ipc"
-version = "0.1.7"
+version = "0.1.8"
 authors = [
     { name="shashstormer", email="shashanka5398@gmail.com" },
 ]
@@ -28,3 +28,6 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["comm_ipc"]
+
+[tool.setuptools.package-data]
+comm_ipc = [".agents/**/*"]

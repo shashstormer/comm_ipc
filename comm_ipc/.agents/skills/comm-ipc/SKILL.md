@@ -54,12 +54,14 @@ For long-running tasks or large data transfers, use streaming.
 - **Consumer**: Read using the async iterator `async for chunk in channel.stream(...)`.
 - Refer to [`scripts/client_stream.py`](scripts/client_stream.py).
 
-### 6. FastAPI Integration
-When exposing CommIPC capabilities over the network:
-- Initialize a `FastAPI` app.
-- Create a `CommAPI(app, client)` bridge instance.
-- Explicitly expose endpoints using `comm_api.add_event()` (for REST) or `comm_api.add_resource()`. Streaming IPC endpoints automatically become Server-Sent Events (SSE).
-- **Group Routing**: When exposing a grouped event via `CommAPI`, you must use the full internal name format: `"{group_name}.{event_name}"` (e.g., `comm_api.add_event(..., event_name="workers.mult", ...)`).
+### 6. FastAPI Integration (CommAPI)
+When exposing CommIPC capabilities over the network, use the `CommAPI` bridge. The gateway is **runtime-resilient**, meaning it resolves schemas dynamically from the IPC mesh and doesn't require a restart if an IPC provider changes its schema or restarts.
+- Initialize: `api = CommAPI(app, client)`.
+- **Channel Objects**: You must pass `CommIPCChannel` objects (from `await client.open("chan")`) to `add_event` and `add_resource`. This allows the gateway to resolve schemas directly from the target channel.
+- **Dynamic Documentation**: `CommAPI` automatically overrides the FastAPI `openapi()` generator to inject the current mesh state into the Swagger UI (`/docs`) in real-time.
+- **RPC/Streaming**: Expose endpoints using `api.add_event()` (requires a manual path) or `api.add_resource(channel)` (uses a path template). 
+- **SSE Subscriptions**: Expose any IPC topic as a live Server-Sent Events stream using `api.add_subscription(channel, "topic_name", "/manual/path")`.
+- **Path Template Helper**: In `add_resource()`, dots in IPC event names (e.g., `workers.mult`) are converted to slashes when filling the `{event}` placeholder to maintain RESTful paths.
 - Refer to [`scripts/fastapi_integration.py`](scripts/fastapi_integration.py).
 
 ### 7. Advanced Usage (Federation & Monitoring)
