@@ -155,7 +155,7 @@ class CommIPCChannel:
         except asyncio.TimeoutError:
             raise Exception(f"Registration for event {self.name}:{name} timed out")
 
-    async def _create_message(self, msg_type: str, event_name: str, data: Any, request_id: str = None) -> Dict:
+    async def _create_message(self, msg_type: str, event_name: str, data: Any, request_id: str = None, is_stream: bool = False) -> Dict:
         msg = {
             "type": msg_type,
             "channel": self.name,
@@ -167,8 +167,8 @@ class CommIPCChannel:
             "timestamp": int(time.time()),
             "request_id": request_id,
             "target_id": None,
-            "is_stream": False,
-            "is_final": False,
+            "is_stream": is_stream,
+            "is_final": False if is_stream else True,
             "sub_name": None
         }
         if isinstance(data, BaseModel):
@@ -195,7 +195,7 @@ class CommIPCChannel:
 
     async def stream(self, event_name: str, data: Any):
         rid = str(uuid.uuid4())
-        msg = await self._create_message("call", event_name, data, rid)
+        msg = await self._create_message("call", event_name, data, rid, is_stream=True)
 
         self.parent.active_streams[rid] = asyncio.Queue(maxsize=1000)
         await self.parent.send_msg(msg)

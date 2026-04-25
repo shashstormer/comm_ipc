@@ -573,7 +573,8 @@ class CommIPC:
             "data": data,
             "request_id": rid,
             "sender_id": self.client_id,
-            "server_id": self.server_id
+            "server_id": self.server_id,
+            "is_final": True
         })
         return await fut
 
@@ -589,7 +590,9 @@ class CommIPC:
             "data": data,
             "request_id": rid,
             "sender_id": self.client_id,
-            "server_id": self.server_id
+            "server_id": self.server_id,
+            "is_stream": True,
+            "is_final": False
         })
         try:
             while True:
