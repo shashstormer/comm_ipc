@@ -29,11 +29,11 @@ class TestStrictAsync(unittest.IsolatedAsyncioTestCase):
             await ch_c.event("call_sync", {})
             
         err_msg = str(cm.exception)
-        self.assertIn("can't be used in 'await' expression", err_msg)
+        self.assertTrue(any(x in err_msg for x in ["can't be used in 'await' expression", "object can't be awaited"]))
         
         err_event = asyncio.Event()
         async def on_err(e): 
-            if "can't be used in 'await' expression" in str(e):
+            if any(x in str(e) for x in ["can't be used in 'await' expression", "object can't be awaited"]):
                 err_event.set()
             
         subscriber = CommIPC(client_id="sub", socket_path=self.socket_path, on_error=on_err)

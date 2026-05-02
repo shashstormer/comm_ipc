@@ -135,5 +135,33 @@ class TestFastAPIAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resp.status_code, 500)
             self.assertIn("intentional fail", resp.json()["detail"])
 
+    async def test_subscription_sse(self):
+        # 1. Add subscription on math channel
+        api_chan = await self.gateway_client.open("math")
+        await api_chan.add_subscription("test_sub")
+        
+        # Expose via CommAPI
+        self.api.add_subscription(api_chan, "test_sub", "/sub")
+        
+        # Create a background task to publish data to this subscription
+        async def background_publisher():
+            await asyncio.sleep(0.1)
+            await api_chan.publish("test_sub", {"message": "hello from sse!"})
+
+        pub_task = asyncio.create_task(background_publisher())
+        
+        # 2. Test SSE stream
+        async with AsyncClient(transport=ASGITransport(app=self.app), base_url="http://test") as ac:
+            results = []
+            async with ac.stream("GET", "/sub?limit=1") as response:
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        results.append(json.loads(line[6:]))
+                        break
+
+        await pub_task
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0], {"message": "hello from sse!"})
+
 if __name__ == "__main__":
     unittest.main()

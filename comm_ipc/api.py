@@ -180,6 +180,9 @@ class CommAPI:
 
         @self.app.get(path, tags=tags)
         async def sse_subscription(request: Request):
+            limit = request.query_params.get("limit")
+            limit = int(limit) if limit and limit.isdigit() else None
+
             async def event_generator():
                 queue = asyncio.Queue(maxsize=100)
                 async def callback(cd: CommData):
@@ -188,20 +191,24 @@ class CommAPI:
                     except asyncio.QueueFull:
                         pass
 
-                    await channel.subscribe(sub_name, callback)
-                    try:
-                        while True:
-                            if await request.is_disconnected():
-                                break
-                            try:
-                                data = await asyncio.wait_for(queue.get(), timeout=2.0)
-                                yield f"data: {json.dumps(data)}\n\n"
-                            except asyncio.TimeoutError:
-                                yield ": keep-alive\n\n"
-                    except Exception as e:
-                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                    finally:
-                        await channel.unsubscribe(sub_name)
+                await channel.subscribe(sub_name, callback)
+                try:
+                    count = 0
+                    while True:
+                        if limit is not None and count >= limit:
+                            break
+                        if await request.is_disconnected():
+                            break
+                        try:
+                            data = await asyncio.wait_for(queue.get(), timeout=2.0)
+                            yield f"data: {json.dumps(data)}\n\n"
+                            count += 1
+                        except asyncio.TimeoutError:
+                            yield ": keep-alive\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                finally:
+                    await channel.unsubscribe(sub_name)
 
             return StreamingResponse(event_generator(), media_type="text/event-stream")
 
