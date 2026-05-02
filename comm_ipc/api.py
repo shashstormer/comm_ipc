@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any, List, Optional, TYPE_CHECKING, Dict
+from typing import Any, List, Optional, TYPE_CHECKING, Dict, Callable
 
 try:
     from fastapi import FastAPI, Body, Request, HTTPException, WebSocket, WebSocketDisconnect
