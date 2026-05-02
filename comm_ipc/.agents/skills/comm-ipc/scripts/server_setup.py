@@ -62,27 +62,31 @@ async def create_and_run_server(
 
 async def demo_server_lifecycle():
     """Demonstrates starting and then gracefully stopping the server."""
-    # Start the server
-    server_task = asyncio.create_task(create_and_run_server())
+    # Initialize the server
+    server = CommIPCServer(
+        server_id="demo_server",
+        socket_path="/tmp/comm_ipc_demo.sock",
+        verbose=True
+    )
+    
+    # Run the server in a background task so it doesn't block
+    print("Starting server in the background...")
+    server_task = asyncio.create_task(server.run())
     
     # Wait for the server to spin up
     await asyncio.sleep(0.5)
     print("Server is running.")
     
     # Keep the server running for a while
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
     
     # Gracefully stop the server
     print("Shutting down server...")
-    await server_task.get_coro().cr_frame.f_locals['server'].stop() if hasattr(server_task.get_coro(), 'cr_frame') else ...
-    # Instead of complicated frame access, better to just return the server from create_and_run_server
-    # Let's do it properly
-    server = await create_and_run_server("/tmp/comm_ipc_demo.sock")
-    server_task = asyncio.create_task(server.run())
-    
-    await asyncio.sleep(2)
     await server.stop()
-    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
     print("Server stopped.")
 
 

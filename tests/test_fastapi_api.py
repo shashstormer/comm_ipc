@@ -268,5 +268,31 @@ class TestFastAPIAPI(unittest.IsolatedAsyncioTestCase):
         for p in [src_path, dest_path]:
             if os.path.exists(p): os.remove(p)
 
+    async def test_add_file_upload(self):
+        # 1. Register listener for upload on the provider side
+        received_chunks = []
+        received_filenames = []
+        async def upload_listener(cd: CommData):
+            received_chunks.append(cd.data["chunk"])
+            received_filenames.append(cd.data["filename"])
+        await self.math_chan.add_event("upload", upload_listener)
+
+        # 2. Expose upload endpoint on the API
+        api_chan = await self.gateway_client.open("math")
+        self.api.add_file_upload("/upload", api_chan, "upload")
+
+        # 3. Test HTTP POST upload
+        async with AsyncClient(transport=ASGITransport(app=self.app), base_url="http://test") as ac:
+            resp = await ac.post("/upload", content=b"fastapi to ipc upload works!", headers={"X-Filename": "upload_test.txt"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json()["status"], "uploaded")
+            self.assertEqual(resp.json()["filename"], "upload_test.txt")
+
+        # Wait a moment for chunks to be processed
+        await asyncio.sleep(0.1)
+        self.assertTrue(len(received_chunks) > 0)
+        self.assertEqual(b"".join(received_chunks), b"fastapi to ipc upload works!")
+        self.assertEqual(received_filenames[0], "upload_test.txt")
+
 if __name__ == "__main__":
     unittest.main()

@@ -212,10 +212,10 @@ class CommAPI:
 
             return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-    def add_file_stream(self, path: str, channel: CommIPCChannel, event_name: str, tags: Optional[List[str]] = None):
+    def add_file_stream(self, path: str, channel: CommIPCChannel, event_name: str, extractor: Optional[Callable[[Request], Dict[str, Any]]] = None, tags: Optional[List[str]] = None):
         """
         Exposes an IPC streaming event as a file/video streaming endpoint with full support for the
-        Range header (Partial Content).
+        Range header (Partial Content). Supports dynamic path parameters with an optional custom extractor.
         """
         tags = tags or [f"File: {channel.name}"]
 
@@ -234,8 +234,21 @@ class CommAPI:
                         if len(parts) > 1 and parts[1]:
                             end_pos = int(parts[1])
 
+                    req_data = {}
+                    if extractor:
+                        if asyncio.iscoroutinefunction(extractor):
+                            extracted = await extractor(request)
+                        else:
+                            extracted = extractor(request)
+                        req_data.update(dict(extracted))
+                    else:
+                        req_data.update(dict(request.path_params))
+                        req_data.update(dict(request.query_params))
+
+                    req_data.update({"start": start_pos, "end": end_pos})
+
                     current_offset = 0
-                    async for chunk_msg in channel.stream(event_name, {"start": start_pos, "end": end_pos}):
+                    async for chunk_msg in channel.stream(event_name, req_data):
                         chunk = chunk_msg.data
                         if isinstance(chunk, dict) and "chunk" in chunk:
                             chunk = chunk["chunk"]
@@ -341,5 +354,26 @@ class CommAPI:
                 ws_task.cancel()
                 ipc_task.cancel()
                 await channel.unsubscribe(event_name)
+
+    def add_file_upload(self, path: str, channel: CommIPCChannel, event_name: str, tags: Optional[List[str]] = None):
+        """
+        Exposes an endpoint to receive file uploads from clients and streams chunks
+        directly into an IPC event listener to avoid double writes.
+        """
+        tags = tags or [f"Upload: {channel.name}"]
+
+        @self.app.post(path, tags=tags)
+        async def file_upload_route(request: Request):
+            filename = (
+                request.headers.get("x-file-name") or
+                request.headers.get("x-filename") or
+                request.headers.get("file-name") or
+                request.headers.get("filename") or
+                request.query_params.get("filename") or
+                request.query_params.get("file_name")
+            )
+            async for chunk in request.stream():
+                await channel.send(event_name, {"chunk": chunk, "filename": filename})
+            return {"status": "uploaded", "filename": filename}
 
 

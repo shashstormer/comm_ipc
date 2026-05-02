@@ -52,7 +52,8 @@ For fan-out notifications or uncoupled event listeners:
 For long-running tasks or large data transfers, use streaming.
 - **Provider**: Create an asynchronous generator function (`async def func(): yield chunk`) and register it using `add_stream`.
 - **Consumer**: Read using the async iterator `async for chunk in channel.stream(...)`.
-- Refer to [`scripts/client_stream.py`](scripts/client_stream.py).
+- **High-Performance File Sharing**: Transfer files in binary chunks using `upload_file(file_path, remote_event)` and `download_file(event_name, dest_path)`.
+- Refer to [`scripts/client_stream.py`](scripts/client_stream.py) and [`scripts/client_file_sharing.py`](scripts/client_file_sharing.py).
 
 ### 6. FastAPI Integration (CommAPI)
 When exposing CommIPC capabilities over the network, use the `CommAPI` bridge. The gateway is **runtime-resilient**, meaning it resolves schemas dynamically from the IPC mesh and doesn't require a restart if an IPC provider changes its schema or restarts.
@@ -61,8 +62,11 @@ When exposing CommIPC capabilities over the network, use the `CommAPI` bridge. T
 - **Dynamic Documentation**: `CommAPI` automatically overrides the FastAPI `openapi()` generator to inject the current mesh state into the Swagger UI (`/docs`) in real-time.
 - **RPC/Streaming**: Expose endpoints using `api.add_event()` (requires a manual path) or `api.add_resource(channel)` (uses a path template). 
 - **SSE Subscriptions**: Expose any IPC topic as a live Server-Sent Events stream using `api.add_subscription(channel, "topic_name", "/manual/path")`.
+- **File & Video Streaming**: Support file streaming with the Range header using `api.add_file_stream(path, channel, event_name)`.
+- **Bidirectional WebSockets**: Expose any topic as a two-way bidirectional WebSocket using `api.add_websocket(path, channel, event_name)`.
+- **High-Performance File Uploads**: Stream raw FastAPI POST requests directly into the IPC event listener using `api.add_file_upload(path, channel, event_name)`.
 - **Path Template Helper**: In `add_resource()`, dots in IPC event names (e.g., `workers.mult`) are converted to slashes when filling the `{event}` placeholder to maintain RESTful paths.
-- Refer to [`scripts/fastapi_integration.py`](scripts/fastapi_integration.py).
+- Refer to [`scripts/fastapi_integration.py`](scripts/fastapi_integration.py), [`scripts/fastapi_file_websocket.py`](scripts/fastapi_file_websocket.py), and [`scripts/ipc_to_ipc_processing.py`](scripts/ipc_to_ipc_processing.py).
 
 ### 7. Advanced Usage (Federation & Monitoring)
 For complex multi-hub networks or observability:

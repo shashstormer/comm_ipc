@@ -29,14 +29,16 @@ async def run_federation_demo():
 
     # 2. Setup the Bridge between the two hubs
     print("Initializing Bridge...")
-    bridge = CommIPCBridge(bridge_id="bridge_AB")
+    # Pass socket paths and allowed_channels in the constructor
+    bridge = CommIPCBridge(
+        bridge_id="bridge_AB", 
+        socket_path1="/tmp/hub_A.sock", 
+        socket_path2="/tmp/hub_B.sock",
+        allowed_channels=["federated_channel"]
+    )
     
     # Connect the bridge (it acts as a client on both sides, routing traffic)
-    # We can optionally restrict traffic to specific channels using `allowed_channels`
-    await bridge.connect(
-        target1_params={"socket_path": "/tmp/hub_A.sock"},
-        target2_params={"socket_path": "/tmp/hub_B.sock"}
-    )
+    await bridge.connect(target1_params={}, target2_params={})
     print("Bridge connected. Federation active.")
 
     # 3. Client on Hub A (Provider)

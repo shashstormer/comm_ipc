@@ -76,7 +76,7 @@ async def run_decorator_demo():
     print(f"Add Result: {res.data['result']}")
     
     # Call Group RPC (Using the App helper automatically formats the name)
-    res_group = await channel.group("workers").event("mult", {"a": 4, "b": 5})
+    res_group = await channel.group("workers").get("mult", {"a": 4, "b": 5})
     # If calling natively without the helper: await channel.event("workers.mult", ...)
     print(f"Mult (Group) Result: {res_group.data['result']}")
     
