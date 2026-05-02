@@ -350,6 +350,32 @@ class CommIPCChannel:
             return res
         return None
 
+    async def upload_file(self, file_path: str, remote_event: str, chunk_size: int = 65536):
+        """Reads a file in chunks and streams it over to the remote IPC event via event calls."""
+        import os
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File {file_path} not found")
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                is_final = len(chunk) < chunk_size
+                if not chunk and not is_final:
+                    break
+                await self.event(remote_event, {"chunk": chunk, "is_final": is_final})
+                if is_final or not chunk:
+                    break
+
+    async def download_file(self, event_name: str, dest_path: str, request_data: Optional[Dict] = None):
+        """Invokes a streaming IPC event and writes received chunks directly to disk."""
+        if request_data is None:
+            request_data = {}
+        with open(dest_path, "wb") as f:
+            async for chunk_msg in self.stream(event_name, request_data):
+                if isinstance(chunk_msg.data, dict) and "chunk" in chunk_msg.data:
+                    f.write(chunk_msg.data["chunk"])
+                elif isinstance(chunk_msg.data, bytes):
+                    f.write(chunk_msg.data)
+
     async def handle_receive(self, comm_data: CommData):
         if self.message_key:
             if not security.verify_signature(self.message_key, comm_data.to_dict(), comm_data.signature):

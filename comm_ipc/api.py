@@ -212,4 +212,134 @@ class CommAPI:
 
             return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    def add_file_stream(self, path: str, channel: CommIPCChannel, event_name: str, tags: Optional[List[str]] = None):
+        """
+        Exposes an IPC streaming event as a file/video streaming endpoint with full support for the
+        Range header (Partial Content).
+        """
+        tags = tags or [f"File: {channel.name}"]
+
+        @self.app.get(path, tags=tags)
+        async def file_stream_route(request: Request):
+            range_header = request.headers.get("range")
+            
+            async def event_generator():
+                try:
+                    start_pos = 0
+                    end_pos = None
+                    if range_header and range_header.startswith("bytes="):
+                        parts = range_header.split("=")[1].split("-")
+                        if parts[0]:
+                            start_pos = int(parts[0])
+                        if len(parts) > 1 and parts[1]:
+                            end_pos = int(parts[1])
+
+                    current_offset = 0
+                    async for chunk_msg in channel.stream(event_name, {"start": start_pos, "end": end_pos}):
+                        chunk = chunk_msg.data
+                        if isinstance(chunk, dict) and "chunk" in chunk:
+                            chunk = chunk["chunk"]
+                        
+                        if isinstance(chunk, str):
+                            import base64
+                            try:
+                                chunk = base64.b64decode(chunk)
+                            except:
+                                chunk = chunk.encode("utf-8")
+
+                        if not isinstance(chunk, bytes):
+                            chunk = str(chunk).encode("utf-8")
+
+                        if current_offset + len(chunk) <= start_pos:
+                            current_offset += len(chunk)
+                            continue
+
+                        if current_offset < start_pos:
+                            offset_in_chunk = start_pos - current_offset
+                            chunk = chunk[offset_in_chunk:]
+                            current_offset = start_pos
+
+                        if end_pos is not None and current_offset + len(chunk) > end_pos:
+                            limit_in_chunk = end_pos - current_offset + 1
+                            chunk = chunk[:limit_in_chunk]
+                            yield chunk
+                            break
+
+                        yield chunk
+                        current_offset += len(chunk)
+
+                except Exception:
+                    pass
+
+            headers = {}
+            status_code = 200
+            if range_header:
+                status_code = 206
+                headers["Accept-Ranges"] = "bytes"
+                headers["Content-Range"] = f"bytes {range_header.split('=')[1]}/*"
+            
+            return StreamingResponse(event_generator(), status_code=status_code, headers=headers, media_type="application/octet-stream")
+
+    def add_websocket(self, path: str, channel: CommIPCChannel, event_name: str, tags: Optional[List[str]] = None):
+        """
+        Creates full bidirectional WebSocket proxying between WebSocket connections and IPC channel.
+        """
+        tags = tags or [f"WebSocket: {channel.name}"]
+
+        @self.app.websocket(path)
+        async def ws_endpoint(websocket: WebSocket):
+            await websocket.accept()
+            queue = asyncio.Queue()
+
+            async def ipc_callback(cd: CommData):
+                try:
+                    queue.put_nowait(cd.data)
+                except asyncio.QueueFull:
+                    pass
+
+            await channel.subscribe(event_name, ipc_callback)
+
+            async def ws_to_ipc():
+                try:
+                    while True:
+                        msg_str = await websocket.receive_text()
+                        try:
+                            data = json.loads(msg_str)
+                        except:
+                            data = msg_str
+                        await channel.event(event_name, data)
+                except WebSocketDisconnect:
+                    pass
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+
+            async def ipc_to_ws():
+                try:
+                    while True:
+                        data = await queue.get()
+                        if isinstance(data, (dict, list)):
+                            await websocket.send_text(json.dumps(data))
+                        else:
+                            await websocket.send_text(str(data))
+                except WebSocketDisconnect:
+                    pass
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+
+            ws_task = asyncio.create_task(ws_to_ipc())
+            ipc_task = asyncio.create_task(ipc_to_ws())
+
+            try:
+                await asyncio.gather(ws_task, ipc_task)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                ws_task.cancel()
+                ipc_task.cancel()
+                await channel.unsubscribe(event_name)
+
 

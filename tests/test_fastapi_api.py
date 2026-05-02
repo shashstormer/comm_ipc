@@ -163,5 +163,110 @@ class TestFastAPIAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0], {"message": "hello from sse!"})
 
+    async def test_add_file_stream_and_range(self):
+        # 1. Register file stream handler on provider
+        async def video_stream(cd: CommData):
+            # Emit binary data or chunks
+            yield b"abcdefghij" # 10 bytes
+
+        await self.math_chan.add_event("video", video_stream)
+
+        # 2. Add file stream route to API
+        api_chan = await self.gateway_client.open("math")
+        self.api.add_file_stream("/video", api_chan, "video")
+
+        # 3. Request bytes via Range header
+        async with AsyncClient(transport=ASGITransport(app=self.app), base_url="http://test") as ac:
+            resp = await ac.get("/video", headers={"Range": "bytes=2-6"})
+            self.assertEqual(resp.status_code, 206)
+            self.assertEqual(resp.content, b"cdefg")
+            self.assertEqual(resp.headers["Content-Range"], "bytes 2-6/*")
+
+    async def test_bidirectional_websocket(self):
+        class MockWebSocket:
+            def __init__(self):
+                self.accepted = False
+                self.sent_messages = []
+                self.to_receive = asyncio.Queue()
+
+            async def accept(self):
+                self.accepted = True
+
+            async def receive_text(self):
+                return await self.to_receive.get()
+
+            async def send_text(self, text):
+                self.sent_messages.append(text)
+
+        # 1. Open math channel for WebSocket
+        api_chan = await self.gateway_client.open("math")
+        self.api.add_websocket("/ws", api_chan, "test_ws")
+
+        # Get the ws_endpoint route directly from FastAPI
+        route = [r for r in self.app.routes if r.path == "/ws"][0]
+        ws_endpoint = route.endpoint
+
+        # Provider adds event/sub for the WebSocket to send to
+        async def ws_receiver(cd: CommData):
+            await self.math_chan.publish("test_ws", cd.data)
+        
+        await self.math_chan.add_event("test_ws", ws_receiver)
+        await self.math_chan.add_subscription("test_ws")
+
+        # 2. Instantiate MockWebSocket and start the endpoint
+        mock_ws = MockWebSocket()
+        ws_task = asyncio.create_task(ws_endpoint(mock_ws))
+
+        # Give it a moment to initialize
+        await asyncio.sleep(0.1)
+
+        # Send text to it!
+        await mock_ws.to_receive.put(json.dumps({"test": "it works"}))
+
+        # Wait up to 1 second for sent message to arrive back
+        start_time = asyncio.get_event_loop().time()
+        while not mock_ws.sent_messages and (asyncio.get_event_loop().time() - start_time < 1.0):
+            await asyncio.sleep(0.05)
+
+        # Cancel the task
+        ws_task.cancel()
+        try:
+            await ws_task
+        except asyncio.CancelledError:
+            pass
+
+        self.assertTrue(mock_ws.accepted)
+        self.assertEqual(len(mock_ws.sent_messages), 1)
+        self.assertIn("it works", mock_ws.sent_messages[0])
+
+    async def test_chunked_file_sharing(self):
+        # 1. Create a temporary source file
+        src_path = "/tmp/test_src.bin"
+        dest_path = "/tmp/test_dest.bin"
+        with open(src_path, "wb") as f:
+            f.write(b"Hello from the file transfer system")
+
+        # Provider registers chunk stream event
+        async def stream_file(cd: CommData):
+            with open(src_path, "rb") as f:
+                while True:
+                    chunk = f.read(10)
+                    if not chunk: break
+                    yield {"chunk": chunk}
+
+        await self.math_chan.add_event("file_stream", stream_file)
+
+        # Download using the channel directly
+        api_chan = await self.gateway_client.open("math")
+        await api_chan.download_file("file_stream", dest_path)
+
+        # Check content match
+        with open(dest_path, "rb") as f:
+            self.assertEqual(f.read(), b"Hello from the file transfer system")
+
+        # Cleanup
+        for p in [src_path, dest_path]:
+            if os.path.exists(p): os.remove(p)
+
 if __name__ == "__main__":
     unittest.main()
