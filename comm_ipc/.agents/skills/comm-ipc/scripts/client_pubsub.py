@@ -1,17 +1,8 @@
-"""
-CommIPC Client Publisher/Subscriber Skill
-
-This skill demonstrates how to implement a Pub/Sub pattern using CommIPC.
-It shows schema declaration, subscribing to events, and publishing data.
-"""
-
 import asyncio
 from pydantic import BaseModel
-
-try:
-    from comm_ipc import CommIPC, CommData
-except ImportError:
-    pass
+import os
+from comm_ipc import CommIPC, CommData
+from comm_ipc.server import CommIPCServer
 
 class User(BaseModel):
     id: int
@@ -19,9 +10,17 @@ class User(BaseModel):
 
 async def run_pubsub_demo():
     """
-    Demonstrates setting up a subscriber and a publisher.
+    Spins up a server in the background, connects a client, and sets up pub/sub.
     """
-    client = CommIPC(return_type="model", verbose=True)
+    socket_path = "/tmp/comm_ipc_pubsub.sock"
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
+        
+    server = CommIPCServer(socket_path=socket_path)
+    server_task = asyncio.create_task(server.run())
+    await asyncio.sleep(0.1) # Wait for server
+    
+    client = CommIPC(socket_path=socket_path, return_type="model", verbose=False)
     await client.connect()
     
     # 1. Open the channel
@@ -29,7 +28,6 @@ async def run_pubsub_demo():
 
     # 2. Define the Subscriber Callback
     async def on_user_join(cd: CommData):
-        # Because we'll declare the schema later, cd.data is automatically validated
         user: User = cd.data
         print(f"[Subscriber] Notification: User {user.name} (ID: {user.id}) joined!")
 
@@ -38,7 +36,6 @@ async def run_pubsub_demo():
     print("Subscribed to 'join_events'.")
 
     # 4. Declare the Subscription Schema
-    # This must be done at least once by any client before publishing to register the schema with the server
     await channel.add_subscription("join_events", model=User)
 
     # 5. Publish to the topic
@@ -52,7 +49,8 @@ async def run_pubsub_demo():
     # 6. Clean up
     await channel.unsubscribe("join_events")
     await client.close()
+    await server.stop()
+    print("Pub/Sub Demo completed successfully.")
 
 if __name__ == "__main__":
-    # Note: A server must be running at /tmp/comm_ipc.sock for this to work
     asyncio.run(run_pubsub_demo())

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comm-ipc"
-version = "0.1.13"
+version = "0.1.14"
 authors = [
     { name="shashstormer", email="shashanka5398@gmail.com" },
 ]
@@ -20,6 +20,10 @@ dependencies = [
 [project.optional-dependencies]
 fastapi = ["fastapi", "uvicorn"]
 test = ["pytest", "pytest-asyncio", "httpx"]
+
+[project.scripts]
+comm-ipc = "comm_ipc.cli:main"
+
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

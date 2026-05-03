@@ -55,6 +55,7 @@ Bridge to expose IPC networks as HTTP endpoints.
 - **`add_file_stream(path, channel, event_name, tags)`**: Expose a specific IPC stream as a file/video stream supporting range headers.
 - **`add_websocket(path, channel, event_name, tags)`**: Expose any topic as a two-way bidirectional WebSocket.
 - **`add_file_upload(path, channel, event_name, tags)`**: Stream an incoming FastAPI request directly into the IPC event listener (Zero Copy/Single-Write).
+- **`add_rpc_websocket(path, channel, event_name, tags)`**: Two-way direct RPC/streaming response over a single WebSocket connection.
 
 ## `CommData`
 The structured message envelope.
@@ -66,110 +67,13 @@ Federation layer to connect two independent CommIPC Hubs.
 - **`connect(target1_params, target2_params)`**: Connects both sides of the bridge and automatically begins synchronizing the `allowed_channels`.
 - **`stop()`**: Closes bridge connections.
 
-## Examples
+## Examples & Scripts
+For full reference and working code, please refer to the following example scripts:
+- [System Monitor & Logs](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/system_monitor.py)
+- [Fastapi Files & WebSockets](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/fastapi_file_websocket.py)
+- [App Decorators & API Demo](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/app_decorator_api.py)
+- [Bridge Federation](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/bridge_federation.py)
+- [Client RPC Examples](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/client_rpc.py)
+- [Client Pub/Sub Examples](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/client_pubsub.py)
+- [Streaming over IPC](file:///home/shash/Desktop/programing/comm_ipc/comm_ipc/.agents/skills/comm-ipc/scripts/client_stream.py)
 
-### Bidirectional WebSocket Proxy Example
-```python
-# To expose a bidirectional WebSocket using FastAPI Gateway
-api_chan = await client.open("video_chat")
-api.add_websocket("/ws", api_chan, "live_stream")
-```
-
-### High-Performance File Upload & Download Example
-```python
-# Provider side
-await channel.add_event("file_download", download_handler)
-
-# Consumer side - downloading the file
-await channel.download_file("file_download", "/path/to/save.mp4")
-```
-
-### Video and File Streaming with Range Headers over FastAPI Example
-```python
-# Create route that exposes the 'video_feed' streaming IPC event
-api_chan = await client.open("media")
-api.add_file_stream("/stream/video", api_chan, "video_feed")
-```
-
-### Serving Files from a Specific Folder Securely Example with Extractor
-```python
-import os
-from fastapi import HTTPException
-
-def specific_folder_extractor(request):
-    filename = request.path_params.get("filename")
-    base_dir = os.path.abspath("./public")
-    target_path = os.path.abspath(os.path.join(base_dir, filename))
-    
-    # Securely verify that the file is strictly within the public folder
-    if not target_path.startswith(base_dir):
-        raise HTTPException(status_code=400, detail="Forbidden")
-        
-    return {"file_path": target_path}
-
-api_chan = await client.open("files")
-api.add_file_stream(
-    path="/files/{filename}",
-    channel=api_chan,
-    event_name="get_file",
-    extractor=specific_folder_extractor
-)
-```
-
-### Direct Streaming User File Uploads over FastAPI to IPC Example (Zero Copy/No Double Write)
-```python
-from fastapi import UploadFile
-
-@app.post("/upload")
-async def upload_file_to_ipc(file: UploadFile):
-    # Zero-copy/single-write: Read from file and stream chunks directly to the IPC channel
-    chunk_size = 65536
-    while True:
-        chunk = await file.read(chunk_size)
-        if not chunk:
-            break
-        # Send binary chunk directly over the IPC channel
-        await api_chan.send("incoming_file_chunk", {"chunk": chunk})
-
-    return {"filename": file.filename, "status": "streamed directly to IPC"}
-```
-
-### Native add_file_upload on CommAPI Example (Zero-Copy)
-```python
-# To natively expose a file upload endpoint that streams directly over IPC
-api.add_file_upload(
-    path="/upload",
-    channel=api_chan,
-    event_name="incoming_file_chunks"
-)
-```
-
-### IPC-Side Receiver for Incoming Uploaded Chunks
-On the receiver side of the IPC network, add an event listener to append incoming chunks directly to disk:
-```python
-import os
-from comm_ipc.comm_data import CommData
-
-async def save_file_chunks(cd: CommData):
-    chunk = cd.data["chunk"]
-    filename = cd.data.get("filename") or "default_file.bin"
-    
-    # Ensure secure and sanitized path
-    safe_name = os.path.basename(filename)
-    os.makedirs("./uploads", exist_ok=True)
-    
-    with open(f"./uploads/{safe_name}", "ab") as f:
-        f.write(chunk)
-
-# Register the event listener on the worker/provider channel
-await chan.add_event("incoming_file_chunks", save_file_chunks)
-```
-
-#### Note on Browser Uploads
-When uploading a file from the browser using standard JavaScript, attach the filename to the request headers or query parameters to be zero-copy/single-write:
-```javascript
-fetch('/upload?filename=' + encodeURIComponent(file.name), {
-  method: 'POST',
-  body: file // Streams raw file blob
-});
-```

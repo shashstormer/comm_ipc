@@ -43,9 +43,12 @@ async def mult(cd: CommData):
     """Grouped RPC handler. (Internally registered as 'workers.mult')"""
     return {"result": cd.data["a"] * cd.data["b"]}
 
+class UpdateModel(BaseModel):
+    info: str
+
 # 5. Declare a Subscription Schema
 # This registers the subscription with the server
-@app.subscription("system_updates", model=dict)
+@app.subscription("system_updates", model=UpdateModel)
 def _declare_updates(): pass
 
 # 6. Listen to Subscriptions / Events
@@ -56,9 +59,20 @@ async def handle_update(cd: CommData):
 
 async def run_decorator_demo():
     """
-    Connects the client and binds the app to a channel.
+    Spins up a local server in the background, connects the client, and binds the app to a channel.
     """
-    client = CommIPC(return_type="model", verbose=True)
+    from comm_ipc.server import CommIPCServer
+    import os
+    
+    # 1. Start a local server in the background
+    socket_path = "/tmp/comm_ipc_decorator.sock"
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
+    server = CommIPCServer(socket_path=socket_path)
+    server_task = asyncio.create_task(server.run())
+    await asyncio.sleep(0.1) # Wait for server
+    
+    client = CommIPC(socket_path=socket_path, return_type="model", verbose=False)
     await client.connect()
     
     # Open the channel
@@ -84,11 +98,9 @@ async def run_decorator_demo():
     async for chunk in channel.stream("counter", {}):
         print(f"Stream Chunk: {chunk.data['count']}")
         
-    # To keep the script running indefinitely as a provider, you would use:
-    # await client.wait_till_end()
-    
     await client.close()
+    await server.stop()
+    print("Demo completed successfully.")
 
 if __name__ == "__main__":
-    # Note: A server must be running at /tmp/comm_ipc.sock for this to work
     asyncio.run(run_decorator_demo())

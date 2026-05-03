@@ -218,3 +218,84 @@ graph TD
     Gateway -- "Modern Route" --> CommIPC["CommIPC Mesh"]
     Gateway -- "Legacy Route" --> Monolith["Old Monolith API"]
 ```
+
+---
+
+## 15. Full-Duplex Web-to-IPC Proxy
+A hybrid bidirectional pattern for bridging targeted client actions (Inbound) and real-time mesh broadasts (Outbound) over a single WebSocket connection.
+
+**CommIPC Implementation**:
+The bridge sets up two concurrent task loops. For inbound messages, the browser makes 1-to-1 targeted **RPC Event Calls** (`channel.event(event_name, data)`). For outbound messages, internal IPC clients broadcast messages via **Pub/Sub** (`channel.publish(event_name, data)`) directly to the web client.
+
+```mermaid
+sequenceDiagram
+    participant WebClient as Browser / Web Client
+    participant API as FastAPI / CommAPI
+    participant IPC as IPC Mesh Nodes
+    WebClient->>API: sends message text via WS
+    API->>IPC: channel.event("realtime", data)
+    Note over IPC: Targeted RPC Event Handler
+    IPC->>API: channel.publish("realtime", update)
+    API->>WebClient: relays message via WS
+```
+
+---
+
+## 16. Two-Way Targeted RPC/Streaming Response over WebSocket
+An RPC-over-WebSocket pattern where the client sends a single targeted request and receives the direct single response (or multiple responses from a stream) immediately over that same socket.
+
+**CommIPC Implementation**:
+Use `CommAPI.add_rpc_websocket()`. The bridge waits for the client to send message text. When a message is received, it invokes `channel.stream()` or `channel.event()` on the target event, and streams the chunk or object directly back to the web client over that same WebSocket.
+
+```mermaid
+sequenceDiagram
+    participant WebClient as Browser / Web Client
+    participant API as FastAPI / CommAPI
+    participant IPC as IPC Mesh Nodes
+    WebClient->>API: Sends single event request with data via WS
+    API->>IPC: channel.stream("query", data)
+    Note over IPC: Targeted Streaming Provider
+    IPC-->>API: Yields response chunks
+    API-->>WebClient: Sends data chunks back via WS
+```
+
+---
+
+## 17. HTTP Server-Sent Events (SSE) with Input Parameters
+A one-way push pattern where the browser initiates a live, continuous Server-Sent Events (SSE) stream using URL path variables, headers, or query parameters as the initial payload.
+
+**CommIPC Implementation**:
+Subscriptions in the underlying IPC mesh do **not** accept any input or filtering parameters. Therefore, the FastAPI backend uses any provided URL query parameters (e.g. `limit`) locally to control stream termination or filtering at the gateway level, then opens a standard subscription to the targeted topic using `CommAPI.add_subscription()`.
+
+```mermaid
+sequenceDiagram
+    participant WebClient as Browser / Web Client
+    participant API as FastAPI / CommAPI
+    participant IPC as IPC Mesh Nodes
+    WebClient->>API: Initiates GET /stream/events?limit=10 via SSE
+    API->>IPC: Subscribes to the topic
+    Note over IPC: Target Topic Emitter
+    IPC-->>API: Publishes new matching updates
+    API-->>WebClient: Streams chunks up to the requested limit
+```
+
+---
+
+## 18. WebSocket SSE with Initial User Input/Payload
+A pattern that emulates an SSE-like stream inside a WebSocket, where the browser first sends an initial payload (e.g. JSON configuration) to the socket, which immediately kicks off a targeted server stream.
+
+**CommIPC Implementation**:
+Because underlying IPC subscriptions accept no input payload, to pass initial filtering/configuration arguments directly into the stream provider, developers use `CommAPI.add_rpc_websocket()`. The client transmits its initial request parameters, and the bridge delegates them directly to a targeted streaming IPC event using `channel.stream(event_name, data)`.
+
+```mermaid
+sequenceDiagram
+    participant WebClient as Browser / Web Client
+    participant API as FastAPI / CommAPI
+    participant IPC as IPC Mesh Nodes
+    WebClient->>API: Connects to WS /ws/stream-events
+    WebClient->>API: Sends initial configuration payload (JSON)
+    API->>IPC: channel.stream("targeted_stream", config)
+    Note over IPC: Target Streaming Provider
+    IPC-->>API: Yields response chunks
+    API-->>WebClient: Relays data chunks back down via WS
+```

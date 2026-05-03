@@ -313,35 +313,47 @@ class CommAPI:
             await channel.subscribe(event_name, ipc_callback)
 
             async def ws_to_ipc():
-                try:
-                    while True:
+                while True:
+                    try:
                         msg_str = await websocket.receive_text()
+                    except WebSocketDisconnect:
+                        break
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        break
+
+                    try:
                         try:
                             data = json.loads(msg_str)
                         except:
                             data = msg_str
-                        await channel.event(event_name, data)
-                except WebSocketDisconnect:
-                    pass
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
+                        try:
+                            await channel.event(event_name, data)
+                        except Exception:
+                            try:
+                                await channel.publish(event_name, data)
+                            except Exception:
+                                pass
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        pass
 
             async def ipc_to_ws():
-                try:
-                    while True:
+                while True:
+                    try:
                         data = await queue.get()
                         if isinstance(data, (dict, list)):
                             await websocket.send_text(json.dumps(data))
                         else:
                             await websocket.send_text(str(data))
-                except WebSocketDisconnect:
-                    pass
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
+                    except WebSocketDisconnect:
+                        break
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        pass
 
             ws_task = asyncio.create_task(ws_to_ipc())
             ipc_task = asyncio.create_task(ipc_to_ws())
@@ -375,5 +387,49 @@ class CommAPI:
             async for chunk in request.stream():
                 await channel.send(event_name, {"chunk": chunk, "filename": filename})
             return {"status": "uploaded", "filename": filename}
+
+    def add_rpc_websocket(self, path: str, channel: CommIPCChannel, event_name: str, tags: Optional[List[str]] = None):
+        """
+        Exposes a WebSocket that receives a direct RPC event request from the browser
+        and continuously streams/returns the targeted response or response stream back over the same socket.
+        """
+        tags = tags or [f"RPC-WS: {channel.name}"]
+
+        @self.app.websocket(path)
+        async def rpc_ws_endpoint(websocket: WebSocket):
+            await websocket.accept()
+            try:
+                while True:
+                    msg_str = await websocket.receive_text()
+                    try:
+                        data = json.loads(msg_str)
+                    except Exception:
+                        data = msg_str
+
+                    try:
+                        # 1. Try to invoke as a stream first
+                        async for chunk in channel.stream(event_name, data):
+                            chunk_data = chunk.data
+                            if isinstance(chunk_data, (dict, list)):
+                                await websocket.send_text(json.dumps(chunk_data))
+                            else:
+                                await websocket.send_text(str(chunk_data))
+                    except Exception:
+                        # 2. Fall back to standard RPC event call
+                        try:
+                            res = await channel.event(event_name, data)
+                            res_data = res.data
+                            if isinstance(res_data, (dict, list)):
+                                await websocket.send_text(json.dumps(res_data))
+                            else:
+                                await websocket.send_text(str(res_data))
+                        except Exception:
+                            pass
+            except WebSocketDisconnect:
+                pass
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
 

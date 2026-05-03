@@ -77,7 +77,7 @@ For complex multi-hub networks or observability:
 For deep technical lookups and network design:
 - [API Reference](references/API_REFERENCE.md): Detailed method signatures for all core classes.
 - [Architecture Diagrams](references/ARCHITECTURE.md): Mermaid visualizations of standard Hub, Gateway, and Federated topologies.
-- [Architectural Patterns](references/PATTERNS.md): How to implement 14 distinct distributed systems architectures (Scatter-Gather, CQRS, Saga, etc.) using CommIPC.
+- [Architectural Patterns](references/PATTERNS.md): How to implement 18 distinct distributed systems architectures (Scatter-Gather, CQRS, Saga, etc.) using CommIPC.
 
 ## Common Edge Cases & Best Practices
 - **Explicit Defaults (CRITICAL)**: Many advanced features are *disabled* by default for maximum performance. You **MUST** manually override the defaults if you want them:

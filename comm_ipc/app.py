@@ -103,7 +103,7 @@ class CommIPCApp:
         if event_name:
             await self.channel.subscribe(event_name, cb)
 
-    async def _apply_sub(self, name: str, model: Optional[Type[BaseModel]]):
+    async def _apply_sub(self, name: str, model: Optional[Type[BaseModel]] = None):
         if not self.channel:
             return
         await self.channel.add_subscription(name, model=model)
