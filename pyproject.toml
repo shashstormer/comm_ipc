@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comm-ipc"
-version = "0.1.14"
+version = "0.1.15"
 authors = [
-    { name="shashstormer", email="shashanka5398@gmail.com" },
+    { name = "shashstormer", email = "shashanka5398@gmail.com" },
 ]
 license = { file = "LICENSE.txt" }
 description = "A lightweight IPC library with bridge, streaming, and FastAPI integration support"
@@ -23,6 +23,10 @@ test = ["pytest", "pytest-asyncio", "httpx"]
 
 [project.scripts]
 comm-ipc = "comm_ipc.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/shashstormer/comm_ipc"
+Repository = "https://github.com/shashstormer/comm_ipc"
 
 
 [tool.pytest.ini_options]
