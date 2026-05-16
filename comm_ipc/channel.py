@@ -38,15 +38,16 @@ class CommIPCChannel:
         else:
             self.message_key = None
 
-    def _create_model_from_schema(self, name: str, schema: Dict[str, Any], root_defs: Dict[str, Any] = None) -> Type[BaseModel]:
+    def _create_model_from_schema(self, name: str, schema: Dict[str, Any], root_defs: Dict[str, Any] = None) -> Type[
+        BaseModel]:
         defs = root_defs or schema.get("$defs", {})
-        
+
         if name in self._generated_models:
             return self._generated_models[name]
-            
+
         properties = schema.get("properties", {})
         required = schema.get("required", [])
-        
+
         fields = {}
         for prop_name, prop_info in properties.items():
             if "$ref" in prop_info:
@@ -56,20 +57,24 @@ class CommIPCChannel:
                     prop_info = defs.get(ref_key, {})
                 elif ref_path.startswith("#/"):
                     pass
-            
+
             prop_type = Any
             ptype = prop_info.get("type")
-            
-            if ptype == "string": prop_type = str
-            elif ptype == "integer": prop_type = int
-            elif ptype == "number": prop_type = float
-            elif ptype == "boolean": prop_type = bool
-            elif ptype == "array": 
+
+            if ptype == "string":
+                prop_type = str
+            elif ptype == "integer":
+                prop_type = int
+            elif ptype == "number":
+                prop_type = float
+            elif ptype == "boolean":
+                prop_type = bool
+            elif ptype == "array":
                 items = prop_info.get("items", {})
                 if "$ref" in items:
                     ref_key = items["$ref"].split("/")[-1]
                     items = defs.get(ref_key, {})
-                
+
                 if items.get("type") == "object":
                     inner_name = items.get("title", f"{prop_name}Item")
                     prop_type = List[self._create_model_from_schema(inner_name, items, defs)]
@@ -81,12 +86,12 @@ class CommIPCChannel:
                     prop_type = self._create_model_from_schema(inner_name, prop_info, defs)
                 else:
                     prop_type = Dict[str, Any]
-            
+
             if prop_name in required:
                 fields[prop_name] = (prop_type, ...)
             else:
                 fields[prop_name] = (Optional[prop_type], None)
-                
+
         model = create_model(schema.get("title", f"Dynamic{name}"), **fields)
         self._generated_models[name] = model
         return model
@@ -99,7 +104,7 @@ class CommIPCChannel:
             validated = schema.model_validate(data)
             if self.parent.return_type == "model":
                 return validated
-            return validated.model_dump()
+            return validated.model_dump(mode="json")
 
         if isinstance(schema, dict) and self.parent.return_type == "model":
             title = schema.get("title", "DynamicModel")
@@ -155,7 +160,8 @@ class CommIPCChannel:
         except asyncio.TimeoutError:
             raise Exception(f"Registration for event {self.name}:{name} timed out")
 
-    async def _create_message(self, msg_type: str, event_name: str, data: Any, request_id: str = None, is_stream: bool = False) -> Dict:
+    async def _create_message(self, msg_type: str, event_name: str, data: Any, request_id: str = None,
+                              is_stream: bool = False) -> Dict:
         msg = {
             "type": msg_type,
             "channel": self.name,
@@ -172,7 +178,7 @@ class CommIPCChannel:
             "sub_name": None
         }
         if isinstance(data, BaseModel):
-            msg["data"] = data.model_dump()
+            msg["data"] = data.model_dump(mode="json")
         if self.message_key:
             msg["signature"] = security.compute_signature(self.message_key, msg)
         return msg
@@ -210,13 +216,13 @@ class CommIPCChannel:
                     if self.message_key:
                         if not security.verify_signature(self.message_key, cd.to_dict(), cd.signature):
                             raise ValueError(f"Invalid signature for channel {self.name}")
-                    
+
                     if self.parent.return_type == "model":
                         schema_info = self.events.get(event_name) or self.remote_schemas.get(event_name)
                         if schema_info:
                             schema = schema_info.get("returns") or schema_info.get("return_schema")
                             if schema:
-                                 cd.data = self.validate_data(cd.data, schema)
+                                cd.data = self.validate_data(cd.data, schema)
                     yield cd
                 if resp.get("is_final"):
                     break
@@ -239,7 +245,7 @@ class CommIPCChannel:
         return_schema = model.model_json_schema() if model else None
         self.subscriptions[sub_name] = {
             "model": model,
-            "return_schema": return_schema 
+            "return_schema": return_schema
         }
         return await self.parent.add_subscription(self.name, sub_name, return_schema=return_schema)
 
@@ -384,19 +390,19 @@ class CommIPCChannel:
                 return
 
         event_name = comm_data.event
-        
+
         if self.parent.return_type == "model":
             logical_name = event_name
             if event_name.startswith("subscription.") and event_name.endswith(".data"):
                 logical_name = event_name.split(".")[1]
-            
+
             schema_info = self.subscriptions.get(logical_name) or self.remote_schemas.get(logical_name)
             if schema_info:
                 if logical_name in self.subscriptions:
-                     schema = schema_info.get("model") or schema_info.get("return_schema")
+                    schema = schema_info.get("model") or schema_info.get("return_schema")
                 else:
-                     schema = schema_info.get("parameters") or schema_info.get("param_schema")
-                
+                    schema = schema_info.get("parameters") or schema_info.get("param_schema")
+
                 if schema:
                     comm_data.data = self.validate_data(comm_data.data, schema)
 

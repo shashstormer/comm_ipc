@@ -27,7 +27,7 @@ class CommData(BaseModel):
         return v if v is not None else ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return self.model_dump()
+        return self.model_dump(mode="json")
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'CommData':

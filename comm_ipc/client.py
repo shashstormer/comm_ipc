@@ -16,8 +16,10 @@ from comm_ipc.config import SOCKET_PATH, DEFAULT_IDLE_TIMEOUT, DEFAULT_DATA_TIME
 
 
 class CommIPC:
-    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH, on_error: Optional[Callable[[Exception], Any]] = None, 
-                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True, reconnect_max_tries: int = 0,
+    def __init__(self, client_id: str = None, socket_path: str = SOCKET_PATH,
+                 on_error: Optional[Callable[[Exception], Any]] = None,
+                 ssl_context=None, connection_secret: str = None, auto_reconnect: bool = True,
+                 reconnect_max_tries: int = 0,
                  idle_timeout: float = DEFAULT_IDLE_TIMEOUT, data_timeout: float = DEFAULT_DATA_TIMEOUT,
                  heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
                  return_type: Literal["dict", "model"] = "dict",
@@ -53,7 +55,7 @@ class CommIPC:
         self._port = None
         self._send_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
-    
+
     def _log(self, message: str):
         if self.verbose:
             print(f"[CLIENT {self.client_id}] {message}")
@@ -62,10 +64,11 @@ class CommIPC:
         async with self._connect_lock:
             await self._connect_unlocked(host, port, ssl_context, connection_secret)
 
-    async def _connect_unlocked(self, host: str = None, port: int = None, ssl_context=None, connection_secret: str = None):
+    async def _connect_unlocked(self, host: str = None, port: int = None, ssl_context=None,
+                                connection_secret: str = None):
         if connection_secret:
             self.connection_secret = connection_secret
-            
+
         self._host = host or self._host
         self._port = port or self._port
 
@@ -81,7 +84,8 @@ class CommIPC:
         self._log("Connecting to server...")
         try:
             async with self._send_lock:
-                await self._send_to_socket_unlocked({"type": "identify", "client_id": self.client_id, "mode": self.mode})
+                await self._send_to_socket_unlocked(
+                    {"type": "identify", "client_id": self.client_id, "mode": self.mode})
 
             try:
                 len_data = await asyncio.wait_for(self.reader.readexactly(4), timeout=self.idle_timeout)
@@ -99,7 +103,7 @@ class CommIPC:
                 proof = security.compute_signature(secret_hash.encode(), {"challenge": challenge})
                 async with self._send_lock:
                     await self._send_to_socket_unlocked({"type": "conn_proof", "proof": proof})
-                
+
                 len_data = await self.reader.readexactly(4)
                 length = struct.unpack(">I", len_data)[0]
                 data = await self.reader.readexactly(length)
@@ -157,7 +161,7 @@ class CommIPC:
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
             if self.auto_reconnect and not self._is_closing:
-                 asyncio.create_task(self._reconnect())
+                asyncio.create_task(self._reconnect())
 
     async def _reconnect(self):
         delay = 1
@@ -166,7 +170,7 @@ class CommIPC:
                 self._log("Max reconnection attempts reached.")
                 await self.close()
                 break
-            
+
             try:
                 self._reconnect_count += 1
                 await asyncio.sleep(delay)
@@ -282,7 +286,7 @@ class CommIPC:
                                     target_id=i_cd.sender_id,
                                     is_stream=True,
                                     is_final=True
-                                 )
+                                )
                                 final_dict = final.to_dict()
                                 final_dict["type"] = "response"
                                 await self.send_msg(final_dict)
@@ -297,7 +301,7 @@ class CommIPC:
                     except Exception as i_e:
                         if self.on_error:
                             await self.on_error(i_e)
-                        
+
                         target_id = msg.get("sender_id") or (i_cd.sender_id if 'i_cd' in locals() else None)
                         await self.send_msg({
                             "type": "response",
@@ -334,11 +338,11 @@ class CommIPC:
                     }
             if self.on_metadata:
                 if inspect.iscoroutinefunction(self.on_metadata) or inspect.iscoroutine(self.on_metadata):
-                     asyncio.create_task(self.on_metadata(msg))
+                    asyncio.create_task(self.on_metadata(msg))
                 else:
-                     res = self.on_metadata(msg)
-                     if inspect.iscoroutine(res):
-                         asyncio.create_task(res)
+                    res = self.on_metadata(msg)
+                    if inspect.iscoroutine(res):
+                        asyncio.create_task(res)
 
         elif mtype in ("broadcast", "send", "receive"):
             chan_name = msg.get("channel")
@@ -356,7 +360,7 @@ class CommIPC:
             challenge = msg.get("challenge")
             challenge_id = msg.get("challenge_id")
             rid = msg.get("request_id")
-            
+
             if chan_name in self.channels:
                 chan = self.channels[chan_name]
                 if chan.password:
@@ -365,7 +369,7 @@ class CommIPC:
                         challenge.encode(),
                         hashlib.sha256
                     ).hexdigest()
-                    
+
                     await self.send_msg({
                         "type": "register",
                         "request_id": rid,
@@ -377,7 +381,8 @@ class CommIPC:
                 else:
                     if rid in self.pending_calls:
                         fut = self.pending_calls.pop(rid)
-                        fut.set_exception(Exception(f"Channel {chan_name} requires authentication, but no password was provided."))
+                        fut.set_exception(
+                            Exception(f"Channel {chan_name} requires authentication, but no password was provided."))
 
         elif mtype == "error":
             mtext = msg.get('message', 'Unknown server error')
@@ -386,7 +391,7 @@ class CommIPC:
                 fut = self.pending_calls.pop(rid)
                 if not fut.done():
                     fut.set_exception(Exception(mtext))
-            
+
             if self.on_error:
                 err = Exception(mtext)
                 await self.on_error(err)
@@ -397,7 +402,7 @@ class CommIPC:
         rid = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending_calls[rid] = fut
-        
+
         await self.send_msg({
             "type": "add_subscription",
             "channel": chan,
@@ -422,12 +427,12 @@ class CommIPC:
     async def subscribe(self, chan: str, sub_name: str, callback: Callable):
         if not self._ready.is_set():
             await self.connect()
-        
+
         if chan not in self.channels:
             await self.open(chan)
-        
+
         self.channels[chan].on_receive(callback, f"subscription.{sub_name}.data")
-        
+
         rid = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending_calls[rid] = fut
@@ -453,7 +458,7 @@ class CommIPC:
 
     async def publish(self, chan: str, sub_name: str, data: Any):
         if isinstance(data, BaseModel):
-            data = data.model_dump()
+            data = data.model_dump(mode="json")
         await self.send_msg({
             "type": "publish",
             "channel": chan,
@@ -476,14 +481,14 @@ class CommIPC:
 
     async def send_msg(self, msg: Dict):
         if "data" in msg and isinstance(msg["data"], BaseModel):
-            msg["data"] = msg["data"].model_dump()
+            msg["data"] = msg["data"].model_dump(mode="json")
         async with self._send_lock:
             if not self.writer:
                 pass
-        
+
         if not self.writer:
             await self.connect()
-            
+
         async with self._send_lock:
             await self._send_to_socket_unlocked(msg)
 
@@ -496,7 +501,7 @@ class CommIPC:
         except Exception as e:
             if self.on_error:
                 await self.on_error(e)
-            
+
             rid = msg.get("request_id")
             if rid and rid in self.pending_calls:
                 fut = self.pending_calls.pop(rid)
@@ -505,11 +510,11 @@ class CommIPC:
 
     async def open(self, chan: str, password: str = None) -> CommIPCChannel:
         if chan in ["subscription"]:
-             raise ValueError(f"Channel name '{chan}' is reserved")
+            raise ValueError(f"Channel name '{chan}' is reserved")
 
         if not self._ready.is_set():
             await self.connect()
-             
+
         if chan not in self.channels:
             channel = CommIPCChannel(chan, self, password=password)
             self.channels[chan] = channel
@@ -528,13 +533,13 @@ class CommIPC:
             "channel": chan,
             "is_provider": False
         })
-        
+
         try:
             resp = await asyncio.wait_for(fut, timeout=10.0)
             if password and not resp.data.get("authenticated"):
-                 self._log(f"Rejecting unprotected channel {chan}")
-                 if chan in self.channels: del self.channels[chan]
-                 raise Exception(f"Channel {chan} is unprotected, but a password was provided.")
+                self._log(f"Rejecting unprotected channel {chan}")
+                if chan in self.channels: del self.channels[chan]
+                raise Exception(f"Channel {chan} is unprotected, but a password was provided.")
         except asyncio.TimeoutError:
             if chan in self.channels: del self.channels[chan]
             raise Exception(f"Registration for channel {chan} timed out")
@@ -547,14 +552,14 @@ class CommIPC:
         rid = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending_calls[rid] = fut
-        
+
         await self.send_msg({
             "type": "set_password",
             "channel": chan,
             "password": password,
             "request_id": rid
         })
-        
+
         resp = await fut
         if chan in self.channels:
             self.channels[chan].password = password

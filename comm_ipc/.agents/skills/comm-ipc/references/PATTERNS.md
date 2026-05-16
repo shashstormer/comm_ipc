@@ -299,3 +299,57 @@ sequenceDiagram
     IPC-->>API: Yields response chunks
     API-->>WebClient: Relays data chunks back down via WS
 ```
+
+---
+
+## 19. Filter and Forward
+A pattern used to decouple high-volume data ingestion from downstream AI systems. An intermediary processing node listens to a raw data topic, filters out noise, transforms the data into valid feature vectors, and forwards the refined data to targeted AI training or execution pipelines.
+
+**CommIPC Implementation**:
+An AI preprocessing client subscribes to a high-throughput topic (e.g., `raw_telemetry`) using `channel.subscribe()`. Inside the callback, it applies data validation, normalization, and feature extraction. If the data meets quality thresholds, it publishes the transformed payloads to targeted topics (e.g., `model_training_data` for continuous offline learning, and `realtime_inference` for live AI execution) using `channel.publish()`.
+
+```mermaid
+sequenceDiagram
+    participant EdgeNode as Edge / IoT Devices
+    participant IPC as IPC Mesh Nodes
+    participant Preprocessor as AI Data Preprocessor
+    participant Inference as AI Inference Engine
+    participant Trainer as AI Training Pipeline
+
+    EdgeNode->>IPC: publish("raw_telemetry", noisy_data)
+    IPC-->>Preprocessor: Topic: "raw_telemetry"
+    
+    Note over Preprocessor: Filters noise, normalizes,<br/>extracts feature vectors
+    
+    Preprocessor->>IPC: publish("realtime_inference", feature_vector)
+    IPC-->>Inference: Executes live model prediction
+    
+    Preprocessor->>IPC: publish("model_training_data", feature_vector)
+    IPC-->>Trainer: Buffers for continuous learning
+```
+
+---
+
+## 20. Event-Driven AI Pipeline
+A non-subscription based pipeline where data is explicitly pushed through a sequence of processing nodes using targeted RPC events. This provides tighter execution control, guaranteed delivery, and clear error handling compared to pub/sub broadcasts, making it ideal for deterministic, multi-stage AI inference chains.
+
+**CommIPC Implementation**:
+A client submits data to an initial preprocessing event (e.g., `channel.event("ai.preprocess", raw_data)`). The processing node executes its task, and instead of returning the final result immediately to the caller or publishing to a broad topic, it directly invokes the next stage in the pipeline (`channel.event("ai.inference", tensor)`). Using targeted events ensures that each processing stage is explicitly routed and awaited.
+
+```mermaid
+sequenceDiagram
+    participant Source as Data Source
+    participant IPC as IPC Mesh Nodes
+    participant Preprocessor as Preprocessing Node
+    participant Inference as Inference Engine
+    participant Storage as Vector DB / Storage
+
+    Source->>IPC: event("ai.preprocess", raw_data)
+    IPC->>Preprocessor: Executes Preprocessing
+    Note over Preprocessor: Extracts tensor features
+    Preprocessor->>IPC: event("ai.inference", tensor)
+    IPC->>Inference: Executes AI Model
+    Note over Inference: Generates embeddings/results
+    Inference->>IPC: event("db.store", embeddings)
+    IPC->>Storage: Saves results
+```
